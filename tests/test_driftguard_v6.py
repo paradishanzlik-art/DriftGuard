@@ -77,5 +77,15 @@ class DriftGuardV6Tests(unittest.TestCase):
         self.assertEqual(d["total_changes"], 0)
 
 
+    def test_python_compile_validation_forces_recompile(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "pkg").mkdir()
+            (root / "pkg" / "mod.py").write_text("VALUE = 1\\n", encoding="utf-8")
+            cmd = driftguard._source_validation(root, "python", "pkg", ["pkg/mod.py"])
+            self.assertIn("compileall", cmd)
+            self.assertIn(" -f ", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
