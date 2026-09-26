@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-DriftGuard 5
-Project-aware environment drift + build-failure prediction + log intelligence.
+DriftGuard 6
+Project-aware environment drift + build-failure prediction + source-impact intelligence.
 
 Standard-library only. Python 3.9+.
 """
@@ -48,6 +48,10 @@ DEFAULT_CONFIG = {
     "max_native_artifacts": 120,
     "max_native_dependency_inspections": 30,
     "dependency_sample_limit": 250,
+    "source_scan_depth": 8,
+    "max_source_manifest_files": 4000,
+    "max_source_hash_bytes": 8000000,
+    "max_graph_source_components": 120,
 }
 
 TRACKED_FILES = {
@@ -2678,6 +2682,418 @@ def report_html(root: Path, report: dict) -> str:
     return base.replace("</body>", section + "</body>")
 
 
+# ---------------------------------------------------------------------------
+# DriftGuard v6: source-change impact intelligence.
+# ---------------------------------------------------------------------------
+
+APP_VERSION = "6.0.0"
+
+SOURCE_SUFFIX_FAMILY = {
+    ".py": "python", ".pyi": "python",
+    ".js": "node", ".jsx": "node", ".mjs": "node", ".cjs": "node",
+    ".ts": "node", ".tsx": "node",
+    ".c": "cpp", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
+    ".h": "cpp", ".hh": "cpp", ".hpp": "cpp", ".hxx": "cpp",
+    ".rs": "rust", ".go": "go", ".cs": "dotnet",
+    ".java": "android", ".kt": "android", ".kts": "android",
+    ".cu": "cuda", ".cuh": "cuda",
+    ".vert": "vulkan", ".frag": "vulkan", ".glsl": "vulkan", ".comp": "vulkan",
+    ".hlsl": "vulkan", ".fx": "vulkan",
+}
+
+_SOURCE_GRAPH_KINDS = {"source-component"}
+
+
+def _source_family_for_path(rel: str, families: Sequence[str]) -> Optional[str]:
+    low = rel.replace("\\", "/").lower()
+    suffix = Path(low).suffix.lower()
+    fam = SOURCE_SUFFIX_FAMILY.get(suffix)
+    if "unreal" in families and (low.endswith(".build.cs") or low.endswith(".target.cs") or low.startswith("source/") or "/source/" in low):
+        if suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".cs"}:
+            return "unreal"
+    if "unity" in families and low.startswith("assets/") and suffix == ".cs":
+        return "unity"
+    return fam
+
+
+def _source_bucket(rel: str) -> str:
+    parts = Path(rel.replace("\\", "/")).parts
+    if len(parts) <= 1:
+        return "."
+    return str(parts[0]).replace("\\", "/")
+
+
+def _read_small_text(path: Path, limit: int = 200000) -> str:
+    try:
+        if path.stat().st_size > limit:
+            return ""
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def _source_validation(root: Path, family: str, bucket: str, sample_paths: Sequence[str]) -> str:
+    if family == "python":
+        pyproject = _read_small_text(root / "pyproject.toml").lower()
+        has_pytest = any((root / name).exists() for name in ("pytest.ini", "conftest.py")) or "pytest" in pyproject
+        if (root / "tests").is_dir():
+            if has_pytest:
+                return f'"{sys.executable}" -m pytest -q'
+            return f'"{sys.executable}" -m unittest discover -s tests -v'
+        target = bucket if bucket != "." else "."
+        return f'"{sys.executable}" -m compileall -q "{target}"'
+    if family == "node":
+        try:
+            pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        except Exception:
+            pkg = {}
+        scripts = pkg.get("scripts", {}) if isinstance(pkg, dict) else {}
+        test_script = str(scripts.get("test", ""))
+        if test_script and "no test specified" not in test_script.lower():
+            return "npm test"
+        if scripts.get("build"):
+            return "npm run build"
+        sample = next((p for p in sample_paths if Path(p).suffix.lower() in {".js", ".mjs", ".cjs"}), None)
+        return f'node --check "{sample}"' if sample else "npm ls --depth=0"
+    if family == "rust": return "cargo test"
+    if family == "go": return "go test ./..."
+    if family == "dotnet": return "dotnet test"
+    if family == "android": return "gradlew test (gradlew.bat test on Windows; ./gradlew test on macOS/Linux)"
+    if family in {"cpp", "cuda", "vulkan"}:
+        if (root / "CMakeLists.txt").exists(): return "cmake --build build --config Debug"
+        return "Run the project's native debug build and targeted tests for the changed source area"
+    if family == "unreal": return "Compile the affected Unreal Editor target/module for the pinned engine, then run relevant automation tests"
+    if family == "unity": return "Run a Unity batchmode compile/test pass for the affected assembly or scene tests"
+    return "Run the narrowest project test/build covering the changed source area"
+
+
+def scan_source_manifest(root: Path, max_depth: int = 8, max_files: int = 4000, max_hash_bytes: int = 8000000) -> dict:
+    """Create a bounded deterministic source manifest and aggregate logical source components."""
+    families = infer_project(
+        root,
+        discover_project_files(root, max_depth),
+        scan_source_shape(root, max_depth, max_files),
+    ).get("families", [])
+    files: Dict[str, dict] = {}
+    component_members: Dict[str, List[Tuple[str, str, int]]] = {}
+    truncated = False
+    seen = 0
+    for base, dirs, names in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in IGNORE_DIRS)
+        names = sorted(names)
+        base_path = Path(base)
+        try:
+            depth = len(base_path.relative_to(root).parts)
+        except ValueError:
+            depth = 0
+        if depth > max_depth:
+            dirs[:] = []
+            continue
+        for name in names:
+            rel_path = (base_path / name).relative_to(root)
+            rel = str(rel_path).replace("\\", "/")
+            family = _source_family_for_path(rel, families)
+            if not family:
+                continue
+            seen += 1
+            if seen > max_files:
+                truncated = True
+                break
+            p = root / rel_path
+            try:
+                size = p.stat().st_size
+                digest = sha256_file(p) if size <= max_hash_bytes else hashlib.sha256(f"oversize:{size}".encode()).hexdigest()
+            except OSError:
+                continue
+            bucket = _source_bucket(rel)
+            rec = {"sha256": digest, "size": size, "family": family, "bucket": bucket}
+            files[rel] = rec
+            key = f"{family}/{bucket}"
+            component_members.setdefault(key, []).append((rel, digest, size))
+        if truncated:
+            break
+
+    components: Dict[str, dict] = {}
+    for key, members in sorted(component_members.items()):
+        family, bucket = key.split("/", 1)
+        canonical = "\n".join(f"{p}|{d}|{s}" for p, d, s in sorted(members))
+        samples = [p for p, _d, _s in sorted(members)[:8]]
+        components[key] = {
+            "family": family,
+            "bucket": bucket,
+            "file_count": len(members),
+            "fingerprint": hashlib.sha256(canonical.encode()).hexdigest(),
+            "sample_paths": samples,
+            "validation": _source_validation(root, family, bucket, samples),
+        }
+    manifest_fp = hashlib.sha256("\n".join(
+        f"{p}|{rec['sha256']}|{rec['size']}" for p, rec in sorted(files.items())
+    ).encode()).hexdigest()
+    return {
+        "schema": 1,
+        "fingerprint": manifest_fp,
+        "file_count": len(files),
+        "files": files,
+        "components": components,
+        "truncated": truncated,
+        "limit": max_files,
+    }
+
+
+def source_change_delta(baseline: dict, current: dict) -> dict:
+    bman = baseline.get("source_manifest") or {}
+    cman = current.get("source_manifest") or {}
+    if "files" not in bman:
+        return {
+            "baseline_available": False,
+            "requires_rebaseline": True,
+            "added": [], "removed": [], "changed": [], "changed_components": [],
+            "total_changes": 0,
+            "note": "The existing baseline predates source-impact tracking. Validate the current project, then run driftguard init --force to enable source-change comparison.",
+        }
+    bf = bman.get("files", {}) or {}
+    cf = cman.get("files", {}) or {}
+    added = sorted(set(cf) - set(bf))
+    removed = sorted(set(bf) - set(cf))
+    changed = sorted(p for p in set(bf) & set(cf) if bf[p].get("sha256") != cf[p].get("sha256"))
+    affected = added + removed + changed
+    components = set()
+    for path in affected:
+        rec = cf.get(path) or bf.get(path) or {}
+        family = rec.get("family")
+        bucket = rec.get("bucket")
+        if family and bucket is not None:
+            components.add(f"{family}/{bucket}")
+    return {
+        "baseline_available": True,
+        "requires_rebaseline": False,
+        "added": added, "removed": removed, "changed": changed,
+        "changed_components": sorted(components),
+        "total_changes": len(affected),
+        "truncated": bool(bman.get("truncated") or cman.get("truncated")),
+    }
+
+
+def _recompute_graph_fingerprint(graph: dict) -> dict:
+    nodes = list(graph.get("nodes", []))
+    edges = list(graph.get("edges", []))
+    canonical_nodes = [f"{n['id']}|{_fingerprint(n.get('state'))}" for n in sorted(nodes, key=lambda x: x["id"])]
+    canonical_edges = [f"{e['src']}|{e['relation']}|{e['dst']}" for e in sorted(edges, key=lambda x: (x['src'], x['relation'], x['dst']))]
+    graph["fingerprint"] = hashlib.sha256("\n".join(canonical_nodes + canonical_edges).encode()).hexdigest()
+    graph["node_count"] = len(nodes)
+    graph["edge_count"] = len(edges)
+    return graph
+
+
+_build_failure_graph_v5 = build_failure_graph
+
+
+def build_failure_graph(snapshot: dict) -> dict:
+    graph = _build_failure_graph_v5(snapshot)
+    nodes = {n["id"]: n for n in graph.get("nodes", [])}
+    edges = list(graph.get("edges", []))
+    seen = {(e["src"], e["dst"], e["relation"]) for e in edges}
+    families = set((snapshot.get("project", {}) or {}).get("families", []) or [])
+    source = snapshot.get("source_manifest", {}) or {}
+    max_nodes = int(DEFAULT_CONFIG.get("max_graph_source_components", 120))
+    for key, rec in list(sorted((source.get("components", {}) or {}).items()))[:max_nodes]:
+        family = str(rec.get("family") or "source")
+        bucket = str(rec.get("bucket") or ".")
+        sid = _add_graph_node(
+            nodes, "source-component", key, f"{family} source · {bucket}",
+            state=rec.get("fingerprint"),
+            metadata={
+                "ecosystem": family, "family": family, "bucket": bucket,
+                "file_count": rec.get("file_count", 0),
+                "sample_paths": rec.get("sample_paths", []),
+                "validation": rec.get("validation"),
+            },
+        )
+        parent = _node_id("component", family) if family in families and _node_id("component", family) in nodes else "project:root"
+        _add_graph_edge(edges, seen, parent, sid, "contains-source")
+    graph["nodes"] = list(sorted(nodes.values(), key=lambda x: x["id"]))
+    graph["edges"] = sorted(edges, key=lambda x: (x["src"], x["relation"], x["dst"]))
+    graph["schema"] = 2
+    graph["truncated"] = bool(graph.get("truncated") or len((source.get("components") or {})) > max_nodes)
+    return _recompute_graph_fingerprint(graph)
+
+
+def collect_snapshot_v6_base(root: Path) -> dict:
+    """Collect the v5 snapshot without triggering the v6 override."""
+    return _collect_snapshot_v4(root)
+
+
+def collect_snapshot(root: Path) -> dict:
+    """v6 snapshot adds bounded source fingerprints before building the failure graph."""
+    cfg = get_config(root)
+    snap = collect_snapshot_v6_base(root)
+    snap["schema"] = 6
+    snap["app_version"] = APP_VERSION
+    snap["source_manifest"] = scan_source_manifest(
+        root,
+        int(cfg.get("source_scan_depth", max(8, int(cfg.get("max_scan_depth", 5))))),
+        int(cfg.get("max_source_manifest_files", 4000)),
+        int(cfg.get("max_source_hash_bytes", 8000000)),
+    )
+    snap["failure_graph"] = build_failure_graph(snap)
+    return snap
+
+
+def _neutralize_missing_source_baseline(baseline_graph: dict, current_graph: dict) -> dict:
+    """Avoid upgrade noise when a v5 baseline has no source manifest."""
+    clone = json.loads(json.dumps(baseline_graph or {}))
+    nodes = {n["id"]: n for n in clone.get("nodes", [])}
+    edges = list(clone.get("edges", []))
+    seen = {(e["src"], e["dst"], e["relation"]) for e in edges}
+    source_ids = set()
+    for n in current_graph.get("nodes", []):
+        if n.get("kind") in _SOURCE_GRAPH_KINDS:
+            nodes[n["id"]] = n
+            source_ids.add(n["id"])
+    for e in current_graph.get("edges", []):
+        if e.get("src") in source_ids or e.get("dst") in source_ids:
+            key = (e["src"], e["dst"], e["relation"])
+            if key not in seen and e.get("src") in nodes and e.get("dst") in nodes:
+                edges.append(e); seen.add(key)
+    clone["nodes"] = list(sorted(nodes.values(), key=lambda x: x["id"]))
+    clone["edges"] = sorted(edges, key=lambda x: (x["src"], x["relation"], x["dst"]))
+    clone["schema"] = max(int(clone.get("schema", 1)), 2)
+    return _recompute_graph_fingerprint(clone)
+
+
+_node_validation_v5 = _node_validation
+
+
+def _node_validation(node: dict, families: Sequence[str]) -> str:
+    if node.get("kind") == "source-component":
+        meta = node.get("metadata", {}) or {}
+        if meta.get("validation"):
+            return str(meta["validation"])
+    return _node_validation_v5(node, families)
+
+
+def make_report(root: Path) -> dict:
+    baseline_path = state_path(root, BASELINE_FILE)
+    if not baseline_path.exists(): raise FileNotFoundError("No baseline. Run: driftguard init")
+    baseline = load_json(baseline_path)
+    current = collect_snapshot(root)
+    findings = compare(baseline, current)
+    score_value = stability_score(findings)
+    reqs = doctor(current)
+    impact = source_change_delta(baseline, current)
+    report = {
+        "schema": 6, "generated_at": now_iso(), "project_root": str(root.resolve()),
+        "baseline_timestamp": baseline.get("timestamp"), "score": score_value,
+        "status": stability_status(score_value, findings),
+        "counts": {s: sum(f.severity == s for f in findings) for s in SEVERITY_ORDER},
+        "findings": [asdict(f) for f in findings], "requirements": [asdict(r) for r in reqs],
+        "current": current, "source_impact": impact,
+        "recent_incidents": load_recent_incidents(root, int(get_config(root).get("incident_history_limit", 100)))[-8:],
+    }
+    report["prediction"] = predict_risk(root, report, reqs)
+    baseline_graph = baseline.get("failure_graph") or build_failure_graph(baseline)
+    if "files" not in (baseline.get("source_manifest") or {}):
+        baseline_graph = _neutralize_missing_source_baseline(baseline_graph, current.get("failure_graph", {}))
+    report["failure_graph_prediction"] = failure_graph_prediction(root, report, baseline_graph)
+    top = (report["failure_graph_prediction"].get("top_node") or {}).get("risk", 0)
+    if top:
+        lifted = max(report["prediction"].get("risk", 0), min(96, int(report["prediction"].get("risk", 0) * 0.72 + top * 0.40)))
+        report["prediction"]["risk"] = lifted
+        report["prediction"]["label"] = "LOW" if lifted < 25 else "GUARDED" if lifted < 50 else "ELEVATED" if lifted < 75 else "HIGH"
+        report["prediction"]["graph_top_node"] = report["failure_graph_prediction"].get("top_node")
+    if impact.get("baseline_available") and impact.get("total_changes"):
+        report["prediction"].setdefault("drivers", []).append({
+            "type": "source-impact", "severity": "medium", "item": f"{impact['total_changes']} source file change(s)",
+            "detail": "Changed source components are connected to targeted validation recommendations; source edits are not treated as environment drift by themselves.",
+        })
+    ensure_state(root); write_json(state_path(root, LAST_REPORT_FILE), report)
+    append_jsonl(state_path(root, HISTORY_FILE), {
+        "timestamp": report["generated_at"], "score": report["score"], "status": report["status"],
+        "risk": report["prediction"]["risk"], "risk_label": report["prediction"]["label"],
+        "counts": report["counts"], "graph_top": (report["failure_graph_prediction"].get("top_node") or {}).get("node_id"),
+        "source_changes": impact.get("total_changes", 0),
+    })
+    return report
+
+
+def cmd_impact(root: Path, json_output: bool) -> int:
+    try: report = make_report(root)
+    except FileNotFoundError as e: print(str(e), file=sys.stderr); return 2
+    impact = report.get("source_impact", {})
+    if json_output:
+        print(json.dumps(impact, indent=2)); return 0
+    if not impact.get("baseline_available"):
+        print(impact.get("note") or "Source-impact baseline is not available.")
+        return 0
+    print(f"Source changes: {impact.get('total_changes',0)}")
+    print(f"  modified: {len(impact.get('changed',[]))}  added: {len(impact.get('added',[]))}  removed: {len(impact.get('removed',[]))}")
+    if impact.get("changed_components"):
+        print("Affected components: " + ", ".join(impact["changed_components"]))
+    display = {"changed": "modified", "added": "added", "removed": "removed"}
+    for label in ("changed", "added", "removed"):
+        for path in impact.get(label, [])[:20]:
+            print(f"  {display[label]}: {path}")
+    nxt = report.get("failure_graph_prediction", {}).get("next_validation")
+    if nxt:
+        print(f"Next validation: {nxt.get('command')}")
+    return 0
+
+
+def cmd_validate_next(root: Path, json_output: bool) -> int:
+    try: report = make_report(root)
+    except FileNotFoundError as e: print(str(e), file=sys.stderr); return 2
+    nxt = report.get("failure_graph_prediction", {}).get("next_validation")
+    impact = report.get("source_impact", {})
+    payload = dict(nxt or {})
+    if payload and payload.get("node_id", "").startswith("source-component:"):
+        payload["source_changes"] = {
+            "changed": impact.get("changed", [])[:20], "added": impact.get("added", [])[:20], "removed": impact.get("removed", [])[:20]
+        }
+    if json_output: print(json.dumps(payload, indent=2)); return 0
+    if not nxt:
+        if not impact.get("baseline_available") and impact.get("requires_rebaseline"):
+            print(impact.get("note"))
+        else:
+            print("No elevated graph node requires targeted validation. Run the normal project test/build suite.")
+        return 0
+    print(f"Node   : {nxt['node_id']}")
+    print(f"Reason : {nxt['reason']}")
+    if nxt.get("node_id", "").startswith("source-component:") and impact.get("total_changes"):
+        changed = (impact.get("changed", []) + impact.get("added", []) + impact.get("removed", []))[:8]
+        if changed:
+            print("Changed: " + ", ".join(changed))
+    print(f"Validate: {nxt['command']}")
+    return 0
+
+
+_report_html_v5 = report_html
+
+
+def report_html(root: Path, report: dict) -> str:
+    base = _report_html_v5(root, report)
+    impact = report.get("source_impact", {}) or {}
+    if not impact.get("baseline_available"):
+        detail = html.escape(impact.get("note") or "Source-impact baseline not available.")
+        section = f"<section style='margin-top:24px'><h2>Source impact</h2><div class='panel muted'>{detail}</div></section>"
+        return base.replace("</body>", section + "</body>")
+    paths = []
+    for kind in ("changed", "added", "removed"):
+        for path in impact.get(kind, [])[:12]:
+            paths.append(f"<tr><td>{html.escape(kind)}</td><td><code>{html.escape(path)}</code></td></tr>")
+    section = f"""
+<section style='margin-top:24px'>
+<h2>Source impact</h2>
+<div class='cards'>
+  <div class='card'>Source changes<b>{impact.get('total_changes',0)}</b></div>
+  <div class='card'>Changed components<b>{len(impact.get('changed_components',[]))}</b></div>
+  <div class='card'>Manifest bounded<b>{'yes' if impact.get('truncated') else 'no'}</b></div>
+</div>
+<table><thead><tr><th>Change</th><th>Path</th></tr></thead><tbody>{''.join(paths) if paths else '<tr><td colspan="2" class="ok">No source changes since baseline.</td></tr>'}</tbody></table>
+</section>
+"""
+    return base.replace("</body>", section + "</body>")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="driftguard", description="Predictive environment drift, structural failure graphs, and build-failure diagnosis.")
     p.add_argument("--root", default=".", help="Project root (default: current directory)")
@@ -2702,6 +3118,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("explain", help="Explain one graph node, its risk evidence, and blast radius")
     s.add_argument("node"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("validate-next", help="Show the highest-value validation to run next"); s.add_argument("--json", action="store_true")
+    s = sub.add_parser("impact", help="Show source files/components changed since the known-good baseline"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("export", help="Export standalone HTML dashboard"); s.add_argument("-o", "--output", default="driftguard-report.html")
     s = sub.add_parser("watch", help="Continuously detect changes"); s.add_argument("--interval", type=int, default=None)
     s = sub.add_parser("serve", help="Run local dashboard"); s.add_argument("--port", type=int, default=8765)
@@ -2727,6 +3144,7 @@ def main() -> int:
     if args.command == "graph": return cmd_graph(root, args.format, Path(args.output) if args.output else None)
     if args.command == "explain": return cmd_explain(root, args.node, args.json)
     if args.command == "validate-next": return cmd_validate_next(root, args.json)
+    if args.command == "impact": return cmd_impact(root, args.json)
     if args.command == "export": return cmd_export(root, Path(args.output))
     if args.command == "watch": return cmd_watch(root, max(1, args.interval or int(get_config(root).get("watch_interval", 10))))
     if args.command == "serve": return cmd_serve(root, args.port)
