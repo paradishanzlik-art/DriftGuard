@@ -2743,7 +2743,7 @@ def _source_validation(root: Path, family: str, bucket: str, sample_paths: Seque
                 return f'"{sys.executable}" -m pytest -q'
             return f'"{sys.executable}" -m unittest discover -s tests -v'
         target = bucket if bucket != "." else "."
-        return f'"{sys.executable}" -m compileall -q "{target}"'
+        return f'"{sys.executable}" -m compileall -q -f "{target}"'
     if family == "node":
         try:
             pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
