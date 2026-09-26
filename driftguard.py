@@ -1001,7 +1001,7 @@ def make_report(root: Path) -> dict:
     score_value = stability_score(findings)
     reqs = doctor(current)
     report = {
-        "schema": 3,        "generated_at": now_iso(),
+        "schema": 3,\n        "generated_at": now_iso(),
         "project_root": str(root.resolve()),
         "baseline_timestamp": baseline.get("timestamp"),
         "score": score_value,
@@ -2000,7 +2000,7 @@ def subsystem_prediction(root: Path, report: dict, requirements: List[Requiremen
     if "rust" in families: buckets["toolchain"]["validate"] = "cargo check"
     if "go" in families: buckets["dependencies"]["validate"] = "go test ./..."
     if "cpp" in families: buckets["native_abi"]["validate"] = "cmake --build build --config Debug"
-    if "unreal" in families: buckets["game_engine"]["validate"] = "Regenerate project files, then compile the Editor target for the intended EngineAssociation"    if "unity" in families: buckets["game_engine"]["validate"] = "Open once in the pinned Unity editor and run a batchmode compile/test pass"
+    if "unreal" in families: buckets["game_engine"]["validate"] = "Regenerate project files, then compile the Editor target for the intended EngineAssociation"\n    if "unity" in families: buckets["game_engine"]["validate"] = "Open once in the pinned Unity editor and run a batchmode compile/test pass"
     if "cuda" in families: buckets["graphics_gpu"]["validate"] = "nvcc --version && nvidia-smi"
     if "vulkan" in families: buckets["graphics_gpu"]["validate"] = "vulkaninfo --summary"
     if "android" in families: buckets["mobile_sdk"]["validate"] = "gradlew tasks"
