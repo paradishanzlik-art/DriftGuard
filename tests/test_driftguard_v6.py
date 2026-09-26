@@ -87,5 +87,18 @@ class DriftGuardV6Tests(unittest.TestCase):
             self.assertIn(" -f ", cmd)
 
 
+    def test_python_syntax_signature(self):
+        d = driftguard.analyze_log_text("SyntaxError: '(' was never closed")
+        self.assertEqual(d["primary"]["signature_id"], "python.syntax")
+
+    def test_node_syntax_signature(self):
+        d = driftguard.analyze_log_text("SyntaxError: Unexpected end of input")
+        self.assertEqual(d["primary"]["signature_id"], "node.syntax")
+
+    def test_go_syntax_signature(self):
+        d = driftguard.analyze_log_text("./add.go:7:1: syntax error: unexpected EOF, expected )")
+        self.assertEqual(d["primary"]["signature_id"], "go.syntax")
+
+
 if __name__ == "__main__":
     unittest.main()
