@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "driftguard-local"
+version = "5.0.0"
+description = "Predictive environment drift, native dependency intelligence, and build-failure diagnosis."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{name = "DriftGuard"}]
+dependencies = []
+
+[project.scripts]
+driftguard = "driftguard:main"
+
+[tool.setuptools]
+py-modules = ["driftguard"]
