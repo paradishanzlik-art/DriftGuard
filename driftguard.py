@@ -154,7 +154,7 @@ LOG_SIGNATURES: Tuple[LogSignature, ...] = (
     ),
     LogSignature(
         "python.syntax", "python", "Python source syntax is invalid", "high",
-        (r"SyntaxError:\\s", r"IndentationError:\\s", r"TabError:\\s"),
+        (r"SyntaxError:\s", r"IndentationError:\s", r"TabError:\s"),
         ("A changed Python source file cannot be parsed by the active interpreter.",),
         "Inspect the first reported file/line, correct the syntax or indentation error, then rerun the targeted test/compile validation.",
         ("python", "source", "project"),
@@ -175,7 +175,7 @@ LOG_SIGNATURES: Tuple[LogSignature, ...] = (
     ),
     LogSignature(
         "node.syntax", "node", "JavaScript source syntax is invalid", "high",
-        (r"SyntaxError:\\s*(?:Unexpected|Invalid|missing|Identifier)", r"SyntaxError:\\s*Unexpected end of input"),
+        (r"SyntaxError:\s*(?:Unexpected|Invalid|missing|Identifier)", r"SyntaxError:\s*Unexpected end of input"),
         ("A changed JavaScript source file cannot be parsed by the active Node.js runtime.",),
         "Inspect the first reported source location, correct the syntax error, then rerun the targeted npm/node validation.",
         ("node", "javascript", "source", "project"),
@@ -287,7 +287,7 @@ LOG_SIGNATURES: Tuple[LogSignature, ...] = (
     ),
     LogSignature(
         "go.syntax", "go", "Go source syntax is invalid", "high",
-        (r"(?m)^\\.?/?[^\\n]+\\.go:\\d+:\\d+:\\s+syntax error:",),
+        (r"(?m)^\.?/?[^\n]+\.go:\d+:\d+:\s+syntax error:",),
         ("A changed Go source file cannot be parsed or compiled.",),
         "Inspect the first reported .go file/line, correct the syntax error, then rerun go test ./....",
         ("go", "source", "project"),
