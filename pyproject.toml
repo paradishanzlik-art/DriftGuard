@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "driftguard-local"
-version = "5.0.0"
-description = "Predictive environment drift, native dependency intelligence, and build-failure diagnosis."
+version = "6.0.0"
+description = "Environment drift, structural failure graphs, source-impact intelligence, and targeted build validation."
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{name = "DriftGuard"}]
