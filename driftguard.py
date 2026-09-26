@@ -153,6 +153,13 @@ LOG_SIGNATURES: Tuple[LogSignature, ...] = (
         ("python", "architecture", "path", "visual studio", "gcc", "clang"),
     ),
     LogSignature(
+        "python.syntax", "python", "Python source syntax is invalid", "high",
+        (r"SyntaxError:\\s", r"IndentationError:\\s", r"TabError:\\s"),
+        ("A changed Python source file cannot be parsed by the active interpreter.",),
+        "Inspect the first reported file/line, correct the syntax or indentation error, then rerun the targeted test/compile validation.",
+        ("python", "source", "project"),
+    ),
+    LogSignature(
         "node.resolve", "node", "Node dependency resolution failed", "high",
         (r"npm ERR!.*ERESOLVE", r"ERR_PNPM_PEER_DEP_ISSUES", r"YN0002|YN0060"),
         ("Peer-dependency constraints are incompatible.", "The lockfile/package-manager state may have changed."),
@@ -165,6 +172,13 @@ LOG_SIGNATURES: Tuple[LogSignature, ...] = (
         ("The active Node.js version is outside a package's supported range.",),
         "Switch to the project's expected Node.js version and reinstall dependencies from the lockfile.",
         ("node", "package.json"),
+    ),
+    LogSignature(
+        "node.syntax", "node", "JavaScript source syntax is invalid", "high",
+        (r"SyntaxError:\\s*(?:Unexpected|Invalid|missing|Identifier)", r"SyntaxError:\\s*Unexpected end of input"),
+        ("A changed JavaScript source file cannot be parsed by the active Node.js runtime.",),
+        "Inspect the first reported source location, correct the syntax error, then rerun the targeted npm/node validation.",
+        ("node", "javascript", "source", "project"),
     ),
     LogSignature(
         "cmake.compiler", "cpp", "CMake cannot find or validate a compiler", "critical",
@@ -270,6 +284,13 @@ LOG_SIGNATURES: Tuple[LogSignature, ...] = (
         ("go.mod/go.sum and the resolved module graph are out of sync.",),
         "Restore committed go.mod/go.sum or deliberately run the appropriate module tidy/download workflow and review the diff.",
         ("go", "go.mod", "go.sum"),
+    ),
+    LogSignature(
+        "go.syntax", "go", "Go source syntax is invalid", "high",
+        (r"(?m)^\\.?/?[^\\n]+\\.go:\\d+:\\d+:\\s+syntax error:",),
+        ("A changed Go source file cannot be parsed or compiled.",),
+        "Inspect the first reported .go file/line, correct the syntax error, then rerun go test ./....",
+        ("go", "source", "project"),
     ),
     LogSignature(
         "docker.daemon", "docker", "Docker daemon is unavailable", "high",
@@ -2469,8 +2490,10 @@ def failure_graph_prediction(root: Path, report: dict, baseline_graph: dict) -> 
 
     sig_affinity = {
         "python.module-missing": ({"dependency", "component"}, "python"),
+        "python.syntax": ({"source-component", "component"}, "python"),
         "python.native-load": ({"native-artifact", "native-library", "tool", "component"}, "python"),
         "node.resolve": ({"dependency", "component"}, "node"),
+        "node.syntax": ({"source-component", "component"}, "node"),
         "cmake.compiler": ({"tool", "component"}, "cpp"),
         "cmake.package": ({"dependency", "sdk", "component"}, "cpp"),
         "msvc.unresolved-symbol": ({"native-artifact", "native-library", "tool", "component"}, "cpp"),
@@ -2481,6 +2504,7 @@ def failure_graph_prediction(root: Path, report: dict, baseline_graph: dict) -> 
         "vulkan.driver": ({"sdk", "hardware", "component"}, "vulkan"),
         "unreal.engine-version": ({"engine", "native-artifact", "component"}, "unreal"),
         "dotnet.sdk": ({"sdk", "tool", "component"}, "dotnet"),
+        "go.syntax": ({"source-component", "component"}, "go"),
         "gradle.java": ({"sdk", "tool", "component"}, "android"),
         "docker.daemon": ({"tool", "component"}, "docker"),
     }
