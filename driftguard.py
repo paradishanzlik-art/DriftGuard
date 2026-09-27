@@ -209,6 +209,13 @@ LOG_SIGNATURES: Tuple[LogSignature, ...] = (
         ("msvc", "visual studio", "cl", "msbuild", "project"),
     ),
     LogSignature(
+        "cpp.compile", "cpp", "C/C++ source compilation failed", "high",
+        (r"(?m)^[^\n]+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx):\d+:\d+:\s+(?:fatal\s+)?error:",),
+        ("A changed C or C++ source file does not compile under the active compiler.",),
+        "Inspect the first compiler diagnostic at the reported source location, correct the source error, then rerun the targeted native build.",
+        ("cpp", "source", "compiler", "project"),
+    ),
+    LogSignature(
         "native.undefined-reference", "cpp", "Native linker has undefined references", "high",
         (r"undefined reference to [`'\"]", r"ld: symbol\(s\) not found", r"collect2: error: ld returned"),
         ("A library/object is omitted or link order is incorrect.", "A dependency ABI changed after a compiler/toolchain update."),
@@ -2498,6 +2505,7 @@ def failure_graph_prediction(root: Path, report: dict, baseline_graph: dict) -> 
         "cmake.package": ({"dependency", "sdk", "component"}, "cpp"),
         "msvc.unresolved-symbol": ({"native-artifact", "native-library", "tool", "component"}, "cpp"),
         "msvc.runtime-mismatch": ({"native-artifact", "native-library", "tool", "component"}, "cpp"),
+        "cpp.compile": ({"source-component", "component"}, "cpp"),
         "native.undefined-reference": ({"native-artifact", "native-library", "tool", "component"}, "cpp"),
         "native.architecture": ({"native-artifact", "hardware", "component"}, "cpp"),
         "cuda.driver-toolkit": ({"sdk", "hardware", "tool", "component"}, "cuda"),
