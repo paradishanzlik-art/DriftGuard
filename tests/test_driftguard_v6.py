@@ -105,5 +105,28 @@ class DriftGuardV6Tests(unittest.TestCase):
         self.assertEqual(d["primary"]["signature_id"], "cpp.compile")
 
 
+    def test_record_outcome_can_reuse_preflight_report_without_rescan(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); (root / ".driftguard").mkdir()
+            report = {
+                "prediction": {"risk": 21}, "score": 97, "findings": [],
+                "current": {"project": {"families": ["python"]}},
+            }
+            original = driftguard.make_report
+            def fail_rescan(_root):
+                raise AssertionError("record_outcome unexpectedly rescanned the project")
+            driftguard.make_report = fail_rescan
+            try:
+                event = driftguard.record_outcome(
+                    root, "failure", "guarded-command", command=["python", "-m", "compileall"],
+                    exit_code=1, report=report,
+                )
+            finally:
+                driftguard.make_report = original
+            self.assertEqual(event["risk"], 21)
+            self.assertEqual(event["score"], 97)
+            self.assertEqual(event["project_families"], ["python"])
+
+
 if __name__ == "__main__":
     unittest.main()
