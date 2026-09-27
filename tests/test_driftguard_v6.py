@@ -100,5 +100,10 @@ class DriftGuardV6Tests(unittest.TestCase):
         self.assertEqual(d["primary"]["signature_id"], "go.syntax")
 
 
+    def test_cpp_compile_signature(self):
+        d = driftguard.analyze_log_text("src/display.cpp:9:22: error: expected constructor before token")
+        self.assertEqual(d["primary"]["signature_id"], "cpp.compile")
+
+
 if __name__ == "__main__":
     unittest.main()
