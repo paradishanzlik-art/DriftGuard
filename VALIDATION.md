@@ -28,4 +28,4 @@ Before a tagged release, run the full suite, build from a clean tree, install in
 
 ## Current evidence
 
-v6 currently has 42 passing local automated tests and an end-to-end synthetic source-change smoke test. A clean wheel install and a v5-baseline → v6-upgrade compatibility check also passed locally. This does not yet satisfy the unfamiliar-repository or full cross-OS product-validation gates above.
+v6 currently has 47 passing local automated tests. The Linux unfamiliar-repository campaign completed 10 known-good repositories: harmless source edits passed the selected validations and deliberate breaking edits failed them, with source-failure classification added from campaign findings. A clean wheel install and v5-baseline → v6-upgrade compatibility check also passed locally. Windows/second-OS evidence and controlled diagnosis-time comparison remain open.
