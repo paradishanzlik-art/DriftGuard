@@ -1053,8 +1053,12 @@ def make_report(root: Path) -> dict:
 
 def record_outcome(root: Path, result: str, stage: str, note: str = "", command: Optional[List[str]] = None,
                    exit_code: Optional[int] = None, diagnosis: Optional[dict] = None,
-                   log_path: Optional[str] = None) -> dict:
-    report = make_report(root)
+                   log_path: Optional[str] = None, report: Optional[dict] = None) -> dict:
+    # Guard callers should reuse the preflight report so the outcome is associated
+    # with the conditions that existed before execution, while avoiding a duplicate
+    # full project scan. Direct record callers still collect a fresh report.
+    if report is None:
+        report = make_report(root)
     failure_signatures = [x.get("signature_id") for x in (diagnosis or {}).get("signatures", []) if x.get("signature_id")]
     event = {
         "timestamp": now_iso(),
@@ -1387,7 +1391,7 @@ def cmd_guard(root: Path, command: List[str], max_risk: Optional[int], force: bo
     result = "success" if rc == 0 else "failure"
     record_outcome(
         root, result, "guarded-command", f"duration={elapsed}s", command=command,
-        exit_code=rc, diagnosis=diagnosis, log_path=log_path,
+        exit_code=rc, diagnosis=diagnosis, log_path=log_path, report=report,
     )
     if log_path:
         print(f"Captured log: {log_path}")
