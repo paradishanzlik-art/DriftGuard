@@ -8,8 +8,11 @@
 - Enhanced `validate-next` with source-change context and targeted validation.
 - Added safe compatibility behavior for v5 baselines that predate source tracking.
 - Added source-impact information to reports and the local dashboard.
-- Added six v6 regression tests; 42 tests pass locally.
+- Added eleven v6 regression tests; 47 tests pass locally.
 - Verified clean wheel build/install and v5 → v6 baseline upgrade behavior.
+- Forced Python fallback recompilation to avoid cached-bytecode false negatives.
+- Added Python, Node, Go, and C/C++ source-failure classifiers from the unfamiliar-repository campaign.
+- Completed a 10-repository Linux source-impact validation batch; Windows/second-OS evidence remains pending.
 
 ## 5.0.0
 
