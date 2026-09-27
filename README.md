@@ -41,7 +41,7 @@ driftguard --root . serve --port 8765
 
 ## Verified development evidence
 
-The v6 development branch passes 47 local automated tests. A Linux unfamiliar-repository campaign completed 10 known-good repositories, with harmless and deliberately breaking source edits exercising targeted validation. Clean wheel build/install and v5-baseline → v6-upgrade compatibility were also verified. Windows/second-OS validation remains pending. These are implementation checks, not proof that the risk score is calibrated to real-world failure probability.
+The v6 development branch passes 48 local automated tests. A Linux unfamiliar-repository campaign completed 10 known-good repositories, with harmless and deliberately breaking source edits exercising targeted validation. Clean wheel build/install and v5-baseline → v6-upgrade compatibility were also verified. Windows/second-OS validation remains pending. On the 10-repository Linux campaign, structured diagnosis added a 0.344 s median machine-time overhead after eliminating a duplicate project scan; this is not a human troubleshooting-time measurement. These are implementation checks, not proof that the risk score is calibrated to real-world failure probability.
 
 See `VALIDATION.md` for the remaining product-validation gates.
 
