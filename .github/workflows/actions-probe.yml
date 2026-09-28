@@ -1,0 +1,12 @@
+name: actions-probe
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo
+        run: echo "GitHub Actions probe reached a runner"
