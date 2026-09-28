@@ -1,6 +1,7 @@
 param(
     [string]$ProjectRoot = ".",
-    [string]$OutputPath = ""
+    [string]$OutputPath = "",
+    [string]$ExpectedCommit = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -110,6 +111,27 @@ $harmlessImpact = $harmlessImpactRun.output | ConvertFrom-Json
 $harmlessNextRun = Invoke-Captured $dg @("--root",$tmp,"validate-next","--json") $tmp
 Require-Success $harmlessNextRun "Harmless validate-next"
 $harmlessNext = $harmlessNextRun.output | ConvertFrom-Json
+
+$harmlessPlanRun = Invoke-Captured $dg @("--root",$tmp,"validate-plan","--limit","5","--json") $tmp
+Require-Success $harmlessPlanRun "Harmless validation plan"
+$harmlessPlan = $harmlessPlanRun.output | ConvertFrom-Json
+
+$planScriptPath = Join-Path $tmp "driftguard-validation.ps1"
+$planScriptRun = Invoke-Captured $dg @("--root",$tmp,"validation-script","--shell","powershell","--limit","5","-o",$planScriptPath) $tmp
+Require-Success $planScriptRun "PowerShell validation-script export"
+if (-not (Test-Path $planScriptPath)) { throw "validation-script did not create the requested PowerShell file." }
+$planScriptText = Get-Content -Path $planScriptPath -Raw
+if ($planScriptText -notmatch '\$Python') { throw "Generated PowerShell validation script did not contain the portable Python launcher." }
+
+$harmlessDryRun = Invoke-Captured $dg @("--root",$tmp,"validate-run","--limit","5","--json") $tmp
+Require-Success $harmlessDryRun "Harmless validate-run dry-run"
+$harmlessDry = $harmlessDryRun.output | ConvertFrom-Json
+if ($harmlessDry.execution_requested) { throw "validate-run dry-run unexpectedly requested execution." }
+
+$harmlessExecuteRun = Invoke-Captured $dg @("--root",$tmp,"validate-run","--limit","5","--timeout","120","--execute","--save","--json") $tmp
+Require-Success $harmlessExecuteRun "Harmless validate-run execution"
+$harmlessExecute = $harmlessExecuteRun.output | ConvertFrom-Json
+
 $harmlessGuard = Invoke-Captured $dg @("--root",$tmp,"guard","--capture","--force","--",$py,"-m","unittest","discover","-s",(Join-Path $tmp "tests"),"-v") $tmp
 Require-Success $harmlessGuard "Harmless guarded validation"
 
@@ -124,6 +146,19 @@ $breakingImpact = $breakingImpactRun.output | ConvertFrom-Json
 $breakingNextRun = Invoke-Captured $dg @("--root",$tmp,"validate-next","--json") $tmp
 Require-Success $breakingNextRun "Breaking validate-next"
 $breakingNext = $breakingNextRun.output | ConvertFrom-Json
+$breakingPlanRun = Invoke-Captured $dg @("--root",$tmp,"validate-plan","--limit","5","--json") $tmp
+Require-Success $breakingPlanRun "Breaking validation plan"
+$breakingPlan = $breakingPlanRun.output | ConvertFrom-Json
+
+$breakingExecuteRun = Invoke-Captured $dg @("--root",$tmp,"validate-run","--limit","5","--timeout","120","--execute","--save","--json") $tmp
+if ($breakingExecuteRun.exit_code -eq 0) {
+    throw "Breaking validate-run unexpectedly passed."
+}
+$breakingExecute = $breakingExecuteRun.output | ConvertFrom-Json
+if ($breakingExecute.failed_steps -lt 1) {
+    throw "Breaking validate-run returned failure but did not report a failed step."
+}
+
 $breakingGuard = Invoke-Captured $dg @("--root",$tmp,"guard","--capture","--force","--",$py,"-m","unittest","discover","-s",(Join-Path $tmp "tests"),"-v") $tmp
 if ($breakingGuard.exit_code -eq 0) {
     throw "Breaking guarded validation unexpectedly passed."
@@ -136,8 +171,8 @@ $incident = @($incidents)[-1]
 $signature = $incident.primary_signature
 
 $result = [ordered]@{
-    schema = 1
-    code_commit = "47bc7af2e613e33e44d6181359e3137ae0c74793"
+    schema = 2
+    code_commit = $ExpectedCommit
     generated_at = (Get-Date).ToUniversalTime().ToString("o")
     os = [System.Environment]::OSVersion.VersionString
     powershell = $PSVersionTable.PSVersion.ToString()
@@ -148,10 +183,20 @@ $result = [ordered]@{
     harmless_source_changes = $harmlessImpact.total_changes
     harmless_component = @($harmlessImpact.changed_components)
     harmless_validation = $harmlessNext.command
+    harmless_plan_steps = $harmlessPlan.step_count
+    harmless_plan_executable = $harmlessDry.executable_steps
+    harmless_plan_manual = $harmlessDry.manual_steps
+    harmless_execute_failed_steps = $harmlessExecute.failed_steps
+    harmless_execute_complete = $harmlessExecute.complete
+    validation_script_path = $planScriptPath
+    validation_script_has_python_launcher = ($planScriptText -match '\$Python')
     harmless_guard_exit = $harmlessGuard.exit_code
     breaking_source_changes = $breakingImpact.total_changes
     breaking_component = @($breakingImpact.changed_components)
     breaking_validation = $breakingNext.command
+    breaking_plan_steps = $breakingPlan.step_count
+    breaking_execute_failed_steps = $breakingExecute.failed_steps
+    breaking_execute_stopped_early = $breakingExecute.stopped_early
     breaking_guard_exit = $breakingGuard.exit_code
     breaking_signature = $signature
     expected_signature = "python.syntax"
@@ -160,14 +205,22 @@ $result = [ordered]@{
         $cleanImpact.total_changes -eq 0 -and
         $harmlessImpact.total_changes -ge 1 -and
         $harmlessGuard.exit_code -eq 0 -and
+        $harmlessPlan.step_count -ge 1 -and
+        $harmlessDry.execution_requested -eq $false -and
+        $harmlessExecute.failed_steps -eq 0 -and
+        $harmlessExecute.executed_steps -ge 1 -and
+        (Test-Path $planScriptPath) -and
         $breakingImpact.total_changes -ge 1 -and
+        $breakingExecute.failed_steps -ge 1 -and
         $breakingGuard.exit_code -ne 0 -and
         $signature -eq "python.syntax"
     )
     timings_seconds = [ordered]@{
         install = $install.seconds
         regression_suite = $tests.seconds
+        harmless_validate_run = $harmlessExecuteRun.seconds
         harmless_guard = $harmlessGuard.seconds
+        breaking_validate_run = $breakingExecuteRun.seconds
         breaking_guard = $breakingGuard.seconds
     }
     fixture_path = $tmp
