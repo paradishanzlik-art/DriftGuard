@@ -9,6 +9,9 @@
 - Added five regression tests for command deduplication, ordering/limits, safe fallback, CLI parsing, and case-sensitive command preservation.
 - Added validation-plan data to reports and the local/exported HTML dashboard.
 - Added a cross-platform source-tree validator for the commit-specific GitHub source-ZIP validation workaround.
+- Added `validation-script` for portable PowerShell/Bash validation scripts derived from `validate-plan`.
+- Script export uses conservative command allowlisting; ambiguous/descriptive validations are rendered as manual comments instead of executable shell text.
+- Added four exporter regression tests, bringing the branch to 57 defined tests.
 - Preserved `release/v6-rc1` as the pinned v6.0.0 validation anchor while continuing development on the feature branch.
 
 ## 6.0.0
