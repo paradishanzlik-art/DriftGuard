@@ -33,4 +33,9 @@ The pinned v6.0.0 RC1 anchor is `release/v6-rc1` at `b12e67bb209bd2ae16d8b1b1af1
 
 ## Development beyond RC1
 
-The active development branch is now 6.1.0 and adds `validate-plan`, report/dashboard validation-plan output, and a reusable `validation/validate_source_tree.py` harness for the commit-specific GitHub source-ZIP workaround. Five new planner regression tests are present; the branch currently defines 53 tests in total. These post-RC1 changes are **not** counted as passing release evidence until an exact-source run executes the suite and wheel smoke checks; GitHub Actions remains excluded while runs end in `startup_failure` before jobs are created.
+The active development branch is now 6.1.0 and adds `validate-plan`, report/dashboard validation-plan output, and a reusable `validation/validate_source_tree.py` harness for the commit-specific GitHub source-ZIP workaround. Five new planner regression tests are present; the branch currently defines 57 tests in total. These post-RC1 changes are **not** counted as passing release evidence until an exact-source run executes the suite and wheel smoke checks; GitHub Actions remains excluded while runs end in `startup_failure` before jobs are created.
+
+
+## Portable plan export
+
+The 6.1 development branch can export a generated validation plan with `validation-script --shell powershell|bash`. Export is intentionally conservative: fixed known commands and bounded Python/Node source checks become executable script lines; descriptive engine/manual validations and strings containing shell-control metacharacters remain comments. This reduces copy/paste ambiguity without turning arbitrary repository text into shell execution.
