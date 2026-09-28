@@ -14,6 +14,8 @@
 - Added four exporter regression tests.
 - Added opt-in `validate-run`: dry-run by default, explicit `--execute` for allowlisted validations, direct argv execution without a shell, bounded output capture, timeout handling, stop/continue policy, and optional JSONL evidence persistence.
 - Added five validation-run regression tests, bringing the branch to 62 defined tests.
+- Extended the exact-source validator to verify v6.1 from a fresh installed wheel using a temporary fixture, including plan generation, shell-script export, dry-run behavior, successful allowlisted execution, evidence persistence, and an expected deliberate failure.
+- Extended the native Windows smoke harness to exercise the same v6.1 plan/export/execute loop and removed its stale hard-coded commit identifier.
 - Preserved `release/v6-rc1` as the pinned v6.0.0 validation anchor while continuing development on the feature branch.
 
 ## 6.0.0
