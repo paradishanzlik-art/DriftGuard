@@ -86,5 +86,22 @@ class DriftGuardV61Tests(unittest.TestCase):
         self.assertTrue(args.json)
 
 
+    def test_validation_plan_preserves_case_sensitive_commands(self):
+        report = {
+            "failure_graph_prediction": {
+                "ranked_nodes": [
+                    {"node_id": "upper", "risk": 60, "risk_label": "ELEVATED", "direct": True, "blast_radius": 1, "reasons": ["upper"], "validation": 'python -m compileall "Src"'},
+                    {"node_id": "lower", "risk": 59, "risk_label": "ELEVATED", "direct": True, "blast_radius": 1, "reasons": ["lower"], "validation": 'python -m compileall "src"'},
+                ]
+            }
+        }
+        plan = driftguard.build_validation_plan(report, 5)
+        self.assertEqual(plan["step_count"], 2)
+        self.assertEqual(
+            [step["command"] for step in plan["steps"]],
+            ['python -m compileall "Src"', 'python -m compileall "src"'],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
