@@ -44,3 +44,8 @@ The 6.1 development branch can export a generated validation plan with `validati
 ## Opt-in validation execution
 
 The 6.1 branch adds `validate-run`. It is a dry-run unless `--execute` is supplied. Execution accepts only DriftGuard-owned validation patterns that can be converted to a direct argv list; it does not invoke a shell. Unsupported/descriptive steps remain manual. Results include duration, exit code, bounded output tails, completion state, and can be persisted to `.driftguard/validation_runs.jsonl` with `--save`. This feature still requires exact-source validation before it counts as release evidence.
+
+
+## Expanded exact-source and Windows gates
+
+The source-ZIP harness now exercises the installed 6.1 wheel against a temporary Python fixture: baseline, harmless source change, `validate-plan`, platform-appropriate `validation-script`, dry-run `validate-run`, successful explicit execution with saved evidence, then a deliberate syntax break whose `validate-run` must fail with exit 1. The native Windows harness mirrors the 6.1 plan/export/execute checks and accepts an explicit expected commit value instead of embedding a stale source SHA.
