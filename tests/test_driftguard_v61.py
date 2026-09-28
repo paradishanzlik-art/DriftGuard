@@ -142,5 +142,65 @@ class DriftGuardV61Tests(unittest.TestCase):
         self.assertEqual(args.output, "plan.ps1")
 
 
+    def test_validation_argv_python_compileall(self):
+        argv = driftguard._validation_argv('"/opt/python" -m compileall -q -f "src"')
+        self.assertEqual(argv[0], sys.executable)
+        self.assertEqual(argv[1:], ["-m", "compileall", "-q", "-f", "src"])
+
+    def test_validation_argv_rejects_shell_control(self):
+        self.assertIsNone(driftguard._validation_argv('node --check "src/a.js;rm -rf /"'))
+
+    def test_prepare_validation_execution_marks_manual_steps(self):
+        plan = {
+            "steps": [
+                {"order": 1, "primary_node": "a", "risk": 50, "risk_label": "ELEVATED", "command": "npm test"},
+                {"order": 2, "primary_node": "b", "risk": 40, "risk_label": "GUARDED", "command": "Run the engine editor validation manually"},
+            ]
+        }
+        prepared = driftguard.prepare_validation_execution(plan)
+        self.assertEqual(prepared["executable_steps"], 1)
+        self.assertEqual(prepared["manual_steps"], 1)
+        self.assertTrue(prepared["steps"][0]["executable"])
+        self.assertFalse(prepared["steps"][1]["executable"])
+
+    def test_execute_validation_plan_uses_direct_argv(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plan = {
+                "steps": [
+                    {"order": 1, "primary_node": "a", "risk": 50, "risk_label": "ELEVATED", "command": "git --version"},
+                ]
+            }
+            original = driftguard.subprocess.run
+            seen = []
+            class Dummy:
+                returncode = 0
+                stdout = "git version test"
+                stderr = ""
+            def fake_run(argv, **kwargs):
+                seen.append((argv, kwargs))
+                return Dummy()
+            driftguard.subprocess.run = fake_run
+            try:
+                result = driftguard.execute_validation_plan(root, plan, timeout_seconds=15)
+            finally:
+                driftguard.subprocess.run = original
+            self.assertEqual(seen[0][0], ["git", "--version"])
+            self.assertNotIn("shell", seen[0][1])
+            self.assertTrue(result["passed"])
+            self.assertTrue(result["complete"])
+            self.assertEqual(result["results"][0]["status"], "passed")
+
+    def test_parser_accepts_validate_run(self):
+        parser = driftguard.build_parser()
+        args = parser.parse_args(["validate-run", "--limit", "3", "--timeout", "45", "--execute", "--save", "--json"])
+        self.assertEqual(args.command, "validate-run")
+        self.assertEqual(args.limit, 3)
+        self.assertEqual(args.timeout, 45)
+        self.assertTrue(args.execute)
+        self.assertTrue(args.save)
+        self.assertTrue(args.json)
+
+
 if __name__ == "__main__":
     unittest.main()
