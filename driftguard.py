@@ -52,6 +52,7 @@ DEFAULT_CONFIG = {
     "max_source_manifest_files": 4000,
     "max_source_hash_bytes": 8000000,
     "max_graph_source_components": 120,
+    "validation_plan_limit": 5,
 }
 
 TRACKED_FILES = {
@@ -3033,6 +3034,7 @@ def make_report(root: Path) -> dict:
     if "files" not in (baseline.get("source_manifest") or {}):
         baseline_graph = _neutralize_missing_source_baseline(baseline_graph, current.get("failure_graph", {}))
     report["failure_graph_prediction"] = failure_graph_prediction(root, report, baseline_graph)
+    report["validation_plan"] = build_validation_plan(report, int(get_config(root).get("validation_plan_limit", 5)))
     top = (report["failure_graph_prediction"].get("top_node") or {}).get("risk", 0)
     if top:
         lifted = max(report["prediction"].get("risk", 0), min(96, int(report["prediction"].get("risk", 0) * 0.72 + top * 0.40)))
@@ -3241,7 +3243,31 @@ def report_html(root: Path, report: dict) -> str:
 <table><thead><tr><th>Change</th><th>Path</th></tr></thead><tbody>{''.join(paths) if paths else '<tr><td colspan="2" class="ok">No source changes since baseline.</td></tr>'}</tbody></table>
 </section>
 """
-    return base.replace("</body>", section + "</body>")
+    plan = report.get("validation_plan") or build_validation_plan(report, int(get_config(root).get("validation_plan_limit", 5)))
+    plan_rows = []
+    for step in plan.get("steps", []):
+        plan_rows.append(
+            "<tr>"
+            f"<td>{step.get('order')}</td>"
+            f"<td>{html.escape(str(step.get('risk_label') or ''))} {int(step.get('risk', 0))}/100</td>"
+            f"<td><code>{html.escape(str(step.get('command') or ''))}</code></td>"
+            f"<td>{int(step.get('covered_nodes', 0))}</td>"
+            f"<td>{html.escape(str(step.get('primary_node') or ''))}</td>"
+            "</tr>"
+        )
+    plan_section = f"""
+<section style='margin-top:24px'>
+<h2>Validation plan</h2>
+<div class='cards'>
+  <div class='card'>Targeted steps<b>{plan.get('step_count',0)}</b></div>
+  <div class='card'>Risk nodes covered<b>{(plan.get('coverage') or {}).get('covered_risky_nodes',0)}</b></div>
+  <div class='card'>Risk nodes available<b>{(plan.get('coverage') or {}).get('risky_nodes_with_validation',0)}</b></div>
+</div>
+<table><thead><tr><th>#</th><th>Risk</th><th>Validation</th><th>Nodes</th><th>Primary node</th></tr></thead>
+<tbody>{''.join(plan_rows) if plan_rows else '<tr><td colspan="5" class="ok">No targeted validation required; run the normal project suite.</td></tr>'}</tbody></table>
+</section>
+"""
+    return base.replace("</body>", section + plan_section + "</body>")
 
 
 def build_parser() -> argparse.ArgumentParser:
