@@ -3217,6 +3217,7 @@ def cmd_validate_plan(root: Path, limit: int, json_output: bool) -> int:
             print(f"   Reason: {step['primary_reason']}")
     return 1 if any(int(step.get("risk", 0)) >= 75 for step in plan["steps"]) else 0
 
+
 _SAFE_FIXED_VALIDATIONS = {
     "npm test", "npm run build", "npm ls --depth=0",
     "cargo test", "cargo check", "go test ./...",
@@ -3226,498 +3227,40 @@ _SAFE_FIXED_VALIDATIONS = {
     "cl", "msbuild -version", "docker --version", "git --version",
 }
 
-_SAFE_PYTHON_MODULE_RE = re.compile(
-    r'^(?:"[^"\\r\\n]+"|[^\\s]+)\\s+-m\\s+'
-    r'(pytest(?:\\s+-q)?|unittest\\s+discover\\s+-s\\s+tests\\s+-v|pip\\s+check)
 
-def report_html(root: Path, report: dict) -> str:
-    base = _report_html_v5(root, report)
-    impact = report.get("source_impact", {}) or {}
-    if not impact.get("baseline_available"):
-        detail = html.escape(impact.get("note") or "Source-impact baseline not available.")
-        section = f"<section style='margin-top:24px'><h2>Source impact</h2><div class='panel muted'>{detail}</div></section>"
-        return base.replace("</body>", section + "</body>")
-    paths = []
-    for kind in ("changed", "added", "removed"):
-        for path in impact.get(kind, [])[:12]:
-            paths.append(f"<tr><td>{html.escape(kind)}</td><td><code>{html.escape(path)}</code></td></tr>")
-    section = f"""
-<section style='margin-top:24px'>
-<h2>Source impact</h2>
-<div class='cards'>
-  <div class='card'>Source changes<b>{impact.get('total_changes',0)}</b></div>
-  <div class='card'>Changed components<b>{len(impact.get('changed_components',[]))}</b></div>
-  <div class='card'>Manifest bounded<b>{'yes' if impact.get('truncated') else 'no'}</b></div>
-</div>
-<table><thead><tr><th>Change</th><th>Path</th></tr></thead><tbody>{''.join(paths) if paths else '<tr><td colspan="2" class="ok">No source changes since baseline.</td></tr>'}</tbody></table>
-</section>
-"""
-    plan = report.get("validation_plan") or build_validation_plan(report, int(get_config(root).get("validation_plan_limit", 5)))
-    plan_rows = []
-    for step in plan.get("steps", []):
-        plan_rows.append(
-            "<tr>"
-            f"<td>{step.get('order')}</td>"
-            f"<td>{html.escape(str(step.get('risk_label') or ''))} {int(step.get('risk', 0))}/100</td>"
-            f"<td><code>{html.escape(str(step.get('command') or ''))}</code></td>"
-            f"<td>{int(step.get('covered_nodes', 0))}</td>"
-            f"<td>{html.escape(str(step.get('primary_node') or ''))}</td>"
-            "</tr>"
-        )
-    plan_section = f"""
-<section style='margin-top:24px'>
-<h2>Validation plan</h2>
-<div class='cards'>
-  <div class='card'>Targeted steps<b>{plan.get('step_count',0)}</b></div>
-  <div class='card'>Risk nodes covered<b>{(plan.get('coverage') or {}).get('covered_risky_nodes',0)}</b></div>
-  <div class='card'>Risk nodes available<b>{(plan.get('coverage') or {}).get('risky_nodes_with_validation',0)}</b></div>
-</div>
-<table><thead><tr><th>#</th><th>Risk</th><th>Validation</th><th>Nodes</th><th>Primary node</th></tr></thead>
-<tbody>{''.join(plan_rows) if plan_rows else '<tr><td colspan="5" class="ok">No targeted validation required; run the normal project suite.</td></tr>'}</tbody></table>
-</section>
-"""
-    return base.replace("</body>", section + plan_section + "</body>")
-
-
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="driftguard", description="Predictive environment drift, structural failure graphs, and build-failure diagnosis.")
-    p.add_argument("--root", default=".", help="Project root (default: current directory)")
-    sub = p.add_subparsers(dest="command", required=True)
-    s = sub.add_parser("init", help="Record a known-good baseline"); s.add_argument("--force", action="store_true")
-    s = sub.add_parser("check", help="Full drift + risk report"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("predict", help="Predict build-failure risk"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("doctor", help="Check inferred project requirements"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("record", help="Record a successful/failed build or test outcome")
-    s.add_argument("result", choices=["success", "failure"]); s.add_argument("--stage", default="build"); s.add_argument("--note", default="")
-    s = sub.add_parser("guard", help="Preflight, run a command, then learn from the outcome")
-    s.add_argument("--max-risk", type=int, default=None); s.add_argument("--force", action="store_true"); s.add_argument("--capture", action="store_true"); s.add_argument("cmd", nargs=argparse.REMAINDER)
-    s = sub.add_parser("analyze-log", help="Classify an existing build/runtime log")
-    s.add_argument("log_file"); s.add_argument("--json", action="store_true"); s.add_argument("--save", action="store_true")
-    s = sub.add_parser("incidents", help="Show recent classified build incidents")
-    s.add_argument("--limit", type=int, default=10); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("inventory", help="Show SDK, engine, GPU-driver, dependency-graph, and native-artifact inventory"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("subsystems", help="Rank likely failure subsystems and targeted validations"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("native-scan", help="Inspect native binaries and imported shared-library dependencies"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("graph", help="Show/export the structural failure graph")
-    s.add_argument("--format", choices=["text","json","dot"], default="text"); s.add_argument("-o", "--output")
-    s = sub.add_parser("explain", help="Explain one graph node, its risk evidence, and blast radius")
-    s.add_argument("node"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("validate-next", help="Show the highest-value validation to run next"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("validate-plan", help="Build a deduplicated, risk-prioritized validation sequence"); s.add_argument("--limit", type=int, default=5); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("validation-script", help="Export the targeted validation plan as a reviewable shell script"); s.add_argument("--shell", choices=["bash","powershell"], required=True); s.add_argument("--limit", type=int, default=5); s.add_argument("-o", "--output")
-    s = sub.add_parser("impact", help="Show source files/components changed since the known-good baseline"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("export", help="Export standalone HTML dashboard"); s.add_argument("-o", "--output", default="driftguard-report.html")
-    s = sub.add_parser("watch", help="Continuously detect changes"); s.add_argument("--interval", type=int, default=None)
-    s = sub.add_parser("serve", help="Run local dashboard"); s.add_argument("--port", type=int, default=8765)
-    return p
-
-
-def main() -> int:
-    args = build_parser().parse_args()
-    root = Path(args.root).resolve()
-    if not root.exists() or not root.is_dir():
-        print(f"Invalid project root: {root}", file=sys.stderr); return 2
-    if args.command == "init": return cmd_init(root, args.force)
-    if args.command == "check": return cmd_check(root, args.json)
-    if args.command == "predict": return cmd_predict(root, args.json)
-    if args.command == "doctor": return cmd_doctor(root, args.json)
-    if args.command == "record": return cmd_record(root, args.result, args.stage, args.note)
-    if args.command == "guard": return cmd_guard(root, args.cmd, args.max_risk, args.force, args.capture)
-    if args.command == "analyze-log": return cmd_analyze_log(root, Path(args.log_file), args.json, args.save)
-    if args.command == "incidents": return cmd_incidents(root, max(1, args.limit), args.json)
-    if args.command == "inventory": return cmd_inventory(root, args.json)
-    if args.command == "subsystems": return cmd_subsystems(root, args.json)
-    if args.command == "native-scan": return cmd_native_scan(root, args.json)
-    if args.command == "graph": return cmd_graph(root, args.format, Path(args.output) if args.output else None)
-    if args.command == "explain": return cmd_explain(root, args.node, args.json)
-    if args.command == "validate-next": return cmd_validate_next(root, args.json)
-    if args.command == "validate-plan": return cmd_validate_plan(root, max(1, args.limit), args.json)
-    if args.command == "validation-script": return cmd_validation_script(root, args.shell, Path(args.output) if args.output else None, max(1, args.limit))
-    if args.command == "impact": return cmd_impact(root, args.json)
-    if args.command == "export": return cmd_export(root, Path(args.output))
-    if args.command == "watch": return cmd_watch(root, max(1, args.interval or int(get_config(root).get("watch_interval", 10))))
-    if args.command == "serve": return cmd_serve(root, args.port)
-    return 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-)
-_SAFE_PYTHON_COMPILE_RE = re.compile(
-    r'^(?:"[^"\\r\\n]+"|[^\\s]+)\\s+-m\\s+compileall\\s+-q\\s+-f\\s+"([A-Za-z0-9._/\\\\ -]+)"
-
-def report_html(root: Path, report: dict) -> str:
-    base = _report_html_v5(root, report)
-    impact = report.get("source_impact", {}) or {}
-    if not impact.get("baseline_available"):
-        detail = html.escape(impact.get("note") or "Source-impact baseline not available.")
-        section = f"<section style='margin-top:24px'><h2>Source impact</h2><div class='panel muted'>{detail}</div></section>"
-        return base.replace("</body>", section + "</body>")
-    paths = []
-    for kind in ("changed", "added", "removed"):
-        for path in impact.get(kind, [])[:12]:
-            paths.append(f"<tr><td>{html.escape(kind)}</td><td><code>{html.escape(path)}</code></td></tr>")
-    section = f"""
-<section style='margin-top:24px'>
-<h2>Source impact</h2>
-<div class='cards'>
-  <div class='card'>Source changes<b>{impact.get('total_changes',0)}</b></div>
-  <div class='card'>Changed components<b>{len(impact.get('changed_components',[]))}</b></div>
-  <div class='card'>Manifest bounded<b>{'yes' if impact.get('truncated') else 'no'}</b></div>
-</div>
-<table><thead><tr><th>Change</th><th>Path</th></tr></thead><tbody>{''.join(paths) if paths else '<tr><td colspan="2" class="ok">No source changes since baseline.</td></tr>'}</tbody></table>
-</section>
-"""
-    plan = report.get("validation_plan") or build_validation_plan(report, int(get_config(root).get("validation_plan_limit", 5)))
-    plan_rows = []
-    for step in plan.get("steps", []):
-        plan_rows.append(
-            "<tr>"
-            f"<td>{step.get('order')}</td>"
-            f"<td>{html.escape(str(step.get('risk_label') or ''))} {int(step.get('risk', 0))}/100</td>"
-            f"<td><code>{html.escape(str(step.get('command') or ''))}</code></td>"
-            f"<td>{int(step.get('covered_nodes', 0))}</td>"
-            f"<td>{html.escape(str(step.get('primary_node') or ''))}</td>"
-            "</tr>"
-        )
-    plan_section = f"""
-<section style='margin-top:24px'>
-<h2>Validation plan</h2>
-<div class='cards'>
-  <div class='card'>Targeted steps<b>{plan.get('step_count',0)}</b></div>
-  <div class='card'>Risk nodes covered<b>{(plan.get('coverage') or {}).get('covered_risky_nodes',0)}</b></div>
-  <div class='card'>Risk nodes available<b>{(plan.get('coverage') or {}).get('risky_nodes_with_validation',0)}</b></div>
-</div>
-<table><thead><tr><th>#</th><th>Risk</th><th>Validation</th><th>Nodes</th><th>Primary node</th></tr></thead>
-<tbody>{''.join(plan_rows) if plan_rows else '<tr><td colspan="5" class="ok">No targeted validation required; run the normal project suite.</td></tr>'}</tbody></table>
-</section>
-"""
-    return base.replace("</body>", section + plan_section + "</body>")
-
-
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="driftguard", description="Predictive environment drift, structural failure graphs, and build-failure diagnosis.")
-    p.add_argument("--root", default=".", help="Project root (default: current directory)")
-    sub = p.add_subparsers(dest="command", required=True)
-    s = sub.add_parser("init", help="Record a known-good baseline"); s.add_argument("--force", action="store_true")
-    s = sub.add_parser("check", help="Full drift + risk report"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("predict", help="Predict build-failure risk"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("doctor", help="Check inferred project requirements"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("record", help="Record a successful/failed build or test outcome")
-    s.add_argument("result", choices=["success", "failure"]); s.add_argument("--stage", default="build"); s.add_argument("--note", default="")
-    s = sub.add_parser("guard", help="Preflight, run a command, then learn from the outcome")
-    s.add_argument("--max-risk", type=int, default=None); s.add_argument("--force", action="store_true"); s.add_argument("--capture", action="store_true"); s.add_argument("cmd", nargs=argparse.REMAINDER)
-    s = sub.add_parser("analyze-log", help="Classify an existing build/runtime log")
-    s.add_argument("log_file"); s.add_argument("--json", action="store_true"); s.add_argument("--save", action="store_true")
-    s = sub.add_parser("incidents", help="Show recent classified build incidents")
-    s.add_argument("--limit", type=int, default=10); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("inventory", help="Show SDK, engine, GPU-driver, dependency-graph, and native-artifact inventory"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("subsystems", help="Rank likely failure subsystems and targeted validations"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("native-scan", help="Inspect native binaries and imported shared-library dependencies"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("graph", help="Show/export the structural failure graph")
-    s.add_argument("--format", choices=["text","json","dot"], default="text"); s.add_argument("-o", "--output")
-    s = sub.add_parser("explain", help="Explain one graph node, its risk evidence, and blast radius")
-    s.add_argument("node"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("validate-next", help="Show the highest-value validation to run next"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("validate-plan", help="Build a deduplicated, risk-prioritized validation sequence"); s.add_argument("--limit", type=int, default=5); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("impact", help="Show source files/components changed since the known-good baseline"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("export", help="Export standalone HTML dashboard"); s.add_argument("-o", "--output", default="driftguard-report.html")
-    s = sub.add_parser("watch", help="Continuously detect changes"); s.add_argument("--interval", type=int, default=None)
-    s = sub.add_parser("serve", help="Run local dashboard"); s.add_argument("--port", type=int, default=8765)
-    return p
-
-
-def main() -> int:
-    args = build_parser().parse_args()
-    root = Path(args.root).resolve()
-    if not root.exists() or not root.is_dir():
-        print(f"Invalid project root: {root}", file=sys.stderr); return 2
-    if args.command == "init": return cmd_init(root, args.force)
-    if args.command == "check": return cmd_check(root, args.json)
-    if args.command == "predict": return cmd_predict(root, args.json)
-    if args.command == "doctor": return cmd_doctor(root, args.json)
-    if args.command == "record": return cmd_record(root, args.result, args.stage, args.note)
-    if args.command == "guard": return cmd_guard(root, args.cmd, args.max_risk, args.force, args.capture)
-    if args.command == "analyze-log": return cmd_analyze_log(root, Path(args.log_file), args.json, args.save)
-    if args.command == "incidents": return cmd_incidents(root, max(1, args.limit), args.json)
-    if args.command == "inventory": return cmd_inventory(root, args.json)
-    if args.command == "subsystems": return cmd_subsystems(root, args.json)
-    if args.command == "native-scan": return cmd_native_scan(root, args.json)
-    if args.command == "graph": return cmd_graph(root, args.format, Path(args.output) if args.output else None)
-    if args.command == "explain": return cmd_explain(root, args.node, args.json)
-    if args.command == "validate-next": return cmd_validate_next(root, args.json)
-    if args.command == "validate-plan": return cmd_validate_plan(root, max(1, args.limit), args.json)
-    if args.command == "impact": return cmd_impact(root, args.json)
-    if args.command == "export": return cmd_export(root, Path(args.output))
-    if args.command == "watch": return cmd_watch(root, max(1, args.interval or int(get_config(root).get("watch_interval", 10))))
-    if args.command == "serve": return cmd_serve(root, args.port)
-    return 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-)
-_SAFE_NODE_CHECK_RE = re.compile(r'^node\\s+--check\\s+"([A-Za-z0-9._/\\\\ -]+)"
-
-def report_html(root: Path, report: dict) -> str:
-    base = _report_html_v5(root, report)
-    impact = report.get("source_impact", {}) or {}
-    if not impact.get("baseline_available"):
-        detail = html.escape(impact.get("note") or "Source-impact baseline not available.")
-        section = f"<section style='margin-top:24px'><h2>Source impact</h2><div class='panel muted'>{detail}</div></section>"
-        return base.replace("</body>", section + "</body>")
-    paths = []
-    for kind in ("changed", "added", "removed"):
-        for path in impact.get(kind, [])[:12]:
-            paths.append(f"<tr><td>{html.escape(kind)}</td><td><code>{html.escape(path)}</code></td></tr>")
-    section = f"""
-<section style='margin-top:24px'>
-<h2>Source impact</h2>
-<div class='cards'>
-  <div class='card'>Source changes<b>{impact.get('total_changes',0)}</b></div>
-  <div class='card'>Changed components<b>{len(impact.get('changed_components',[]))}</b></div>
-  <div class='card'>Manifest bounded<b>{'yes' if impact.get('truncated') else 'no'}</b></div>
-</div>
-<table><thead><tr><th>Change</th><th>Path</th></tr></thead><tbody>{''.join(paths) if paths else '<tr><td colspan="2" class="ok">No source changes since baseline.</td></tr>'}</tbody></table>
-</section>
-"""
-    plan = report.get("validation_plan") or build_validation_plan(report, int(get_config(root).get("validation_plan_limit", 5)))
-    plan_rows = []
-    for step in plan.get("steps", []):
-        plan_rows.append(
-            "<tr>"
-            f"<td>{step.get('order')}</td>"
-            f"<td>{html.escape(str(step.get('risk_label') or ''))} {int(step.get('risk', 0))}/100</td>"
-            f"<td><code>{html.escape(str(step.get('command') or ''))}</code></td>"
-            f"<td>{int(step.get('covered_nodes', 0))}</td>"
-            f"<td>{html.escape(str(step.get('primary_node') or ''))}</td>"
-            "</tr>"
-        )
-    plan_section = f"""
-<section style='margin-top:24px'>
-<h2>Validation plan</h2>
-<div class='cards'>
-  <div class='card'>Targeted steps<b>{plan.get('step_count',0)}</b></div>
-  <div class='card'>Risk nodes covered<b>{(plan.get('coverage') or {}).get('covered_risky_nodes',0)}</b></div>
-  <div class='card'>Risk nodes available<b>{(plan.get('coverage') or {}).get('risky_nodes_with_validation',0)}</b></div>
-</div>
-<table><thead><tr><th>#</th><th>Risk</th><th>Validation</th><th>Nodes</th><th>Primary node</th></tr></thead>
-<tbody>{''.join(plan_rows) if plan_rows else '<tr><td colspan="5" class="ok">No targeted validation required; run the normal project suite.</td></tr>'}</tbody></table>
-</section>
-"""
-    return base.replace("</body>", section + plan_section + "</body>")
-
-
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="driftguard", description="Predictive environment drift, structural failure graphs, and build-failure diagnosis.")
-    p.add_argument("--root", default=".", help="Project root (default: current directory)")
-    sub = p.add_subparsers(dest="command", required=True)
-    s = sub.add_parser("init", help="Record a known-good baseline"); s.add_argument("--force", action="store_true")
-    s = sub.add_parser("check", help="Full drift + risk report"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("predict", help="Predict build-failure risk"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("doctor", help="Check inferred project requirements"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("record", help="Record a successful/failed build or test outcome")
-    s.add_argument("result", choices=["success", "failure"]); s.add_argument("--stage", default="build"); s.add_argument("--note", default="")
-    s = sub.add_parser("guard", help="Preflight, run a command, then learn from the outcome")
-    s.add_argument("--max-risk", type=int, default=None); s.add_argument("--force", action="store_true"); s.add_argument("--capture", action="store_true"); s.add_argument("cmd", nargs=argparse.REMAINDER)
-    s = sub.add_parser("analyze-log", help="Classify an existing build/runtime log")
-    s.add_argument("log_file"); s.add_argument("--json", action="store_true"); s.add_argument("--save", action="store_true")
-    s = sub.add_parser("incidents", help="Show recent classified build incidents")
-    s.add_argument("--limit", type=int, default=10); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("inventory", help="Show SDK, engine, GPU-driver, dependency-graph, and native-artifact inventory"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("subsystems", help="Rank likely failure subsystems and targeted validations"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("native-scan", help="Inspect native binaries and imported shared-library dependencies"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("graph", help="Show/export the structural failure graph")
-    s.add_argument("--format", choices=["text","json","dot"], default="text"); s.add_argument("-o", "--output")
-    s = sub.add_parser("explain", help="Explain one graph node, its risk evidence, and blast radius")
-    s.add_argument("node"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("validate-next", help="Show the highest-value validation to run next"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("validate-plan", help="Build a deduplicated, risk-prioritized validation sequence"); s.add_argument("--limit", type=int, default=5); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("impact", help="Show source files/components changed since the known-good baseline"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("export", help="Export standalone HTML dashboard"); s.add_argument("-o", "--output", default="driftguard-report.html")
-    s = sub.add_parser("watch", help="Continuously detect changes"); s.add_argument("--interval", type=int, default=None)
-    s = sub.add_parser("serve", help="Run local dashboard"); s.add_argument("--port", type=int, default=8765)
-    return p
-
-
-def main() -> int:
-    args = build_parser().parse_args()
-    root = Path(args.root).resolve()
-    if not root.exists() or not root.is_dir():
-        print(f"Invalid project root: {root}", file=sys.stderr); return 2
-    if args.command == "init": return cmd_init(root, args.force)
-    if args.command == "check": return cmd_check(root, args.json)
-    if args.command == "predict": return cmd_predict(root, args.json)
-    if args.command == "doctor": return cmd_doctor(root, args.json)
-    if args.command == "record": return cmd_record(root, args.result, args.stage, args.note)
-    if args.command == "guard": return cmd_guard(root, args.cmd, args.max_risk, args.force, args.capture)
-    if args.command == "analyze-log": return cmd_analyze_log(root, Path(args.log_file), args.json, args.save)
-    if args.command == "incidents": return cmd_incidents(root, max(1, args.limit), args.json)
-    if args.command == "inventory": return cmd_inventory(root, args.json)
-    if args.command == "subsystems": return cmd_subsystems(root, args.json)
-    if args.command == "native-scan": return cmd_native_scan(root, args.json)
-    if args.command == "graph": return cmd_graph(root, args.format, Path(args.output) if args.output else None)
-    if args.command == "explain": return cmd_explain(root, args.node, args.json)
-    if args.command == "validate-next": return cmd_validate_next(root, args.json)
-    if args.command == "validate-plan": return cmd_validate_plan(root, max(1, args.limit), args.json)
-    if args.command == "impact": return cmd_impact(root, args.json)
-    if args.command == "export": return cmd_export(root, Path(args.output))
-    if args.command == "watch": return cmd_watch(root, max(1, args.interval or int(get_config(root).get("watch_interval", 10))))
-    if args.command == "serve": return cmd_serve(root, args.port)
-    return 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-)
-_SAFE_TOOL_VERSION_RE = re.compile(
-    r'^(python|python3|node|npm|cmake|gcc|clang|rustc|cargo|go|java|dotnet|adb|nvcc|vulkaninfo|docker|git)\\s+(--version|version)
-
-def report_html(root: Path, report: dict) -> str:
-    base = _report_html_v5(root, report)
-    impact = report.get("source_impact", {}) or {}
-    if not impact.get("baseline_available"):
-        detail = html.escape(impact.get("note") or "Source-impact baseline not available.")
-        section = f"<section style='margin-top:24px'><h2>Source impact</h2><div class='panel muted'>{detail}</div></section>"
-        return base.replace("</body>", section + "</body>")
-    paths = []
-    for kind in ("changed", "added", "removed"):
-        for path in impact.get(kind, [])[:12]:
-            paths.append(f"<tr><td>{html.escape(kind)}</td><td><code>{html.escape(path)}</code></td></tr>")
-    section = f"""
-<section style='margin-top:24px'>
-<h2>Source impact</h2>
-<div class='cards'>
-  <div class='card'>Source changes<b>{impact.get('total_changes',0)}</b></div>
-  <div class='card'>Changed components<b>{len(impact.get('changed_components',[]))}</b></div>
-  <div class='card'>Manifest bounded<b>{'yes' if impact.get('truncated') else 'no'}</b></div>
-</div>
-<table><thead><tr><th>Change</th><th>Path</th></tr></thead><tbody>{''.join(paths) if paths else '<tr><td colspan="2" class="ok">No source changes since baseline.</td></tr>'}</tbody></table>
-</section>
-"""
-    plan = report.get("validation_plan") or build_validation_plan(report, int(get_config(root).get("validation_plan_limit", 5)))
-    plan_rows = []
-    for step in plan.get("steps", []):
-        plan_rows.append(
-            "<tr>"
-            f"<td>{step.get('order')}</td>"
-            f"<td>{html.escape(str(step.get('risk_label') or ''))} {int(step.get('risk', 0))}/100</td>"
-            f"<td><code>{html.escape(str(step.get('command') or ''))}</code></td>"
-            f"<td>{int(step.get('covered_nodes', 0))}</td>"
-            f"<td>{html.escape(str(step.get('primary_node') or ''))}</td>"
-            "</tr>"
-        )
-    plan_section = f"""
-<section style='margin-top:24px'>
-<h2>Validation plan</h2>
-<div class='cards'>
-  <div class='card'>Targeted steps<b>{plan.get('step_count',0)}</b></div>
-  <div class='card'>Risk nodes covered<b>{(plan.get('coverage') or {}).get('covered_risky_nodes',0)}</b></div>
-  <div class='card'>Risk nodes available<b>{(plan.get('coverage') or {}).get('risky_nodes_with_validation',0)}</b></div>
-</div>
-<table><thead><tr><th>#</th><th>Risk</th><th>Validation</th><th>Nodes</th><th>Primary node</th></tr></thead>
-<tbody>{''.join(plan_rows) if plan_rows else '<tr><td colspan="5" class="ok">No targeted validation required; run the normal project suite.</td></tr>'}</tbody></table>
-</section>
-"""
-    return base.replace("</body>", section + plan_section + "</body>")
-
-
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="driftguard", description="Predictive environment drift, structural failure graphs, and build-failure diagnosis.")
-    p.add_argument("--root", default=".", help="Project root (default: current directory)")
-    sub = p.add_subparsers(dest="command", required=True)
-    s = sub.add_parser("init", help="Record a known-good baseline"); s.add_argument("--force", action="store_true")
-    s = sub.add_parser("check", help="Full drift + risk report"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("predict", help="Predict build-failure risk"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("doctor", help="Check inferred project requirements"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("record", help="Record a successful/failed build or test outcome")
-    s.add_argument("result", choices=["success", "failure"]); s.add_argument("--stage", default="build"); s.add_argument("--note", default="")
-    s = sub.add_parser("guard", help="Preflight, run a command, then learn from the outcome")
-    s.add_argument("--max-risk", type=int, default=None); s.add_argument("--force", action="store_true"); s.add_argument("--capture", action="store_true"); s.add_argument("cmd", nargs=argparse.REMAINDER)
-    s = sub.add_parser("analyze-log", help="Classify an existing build/runtime log")
-    s.add_argument("log_file"); s.add_argument("--json", action="store_true"); s.add_argument("--save", action="store_true")
-    s = sub.add_parser("incidents", help="Show recent classified build incidents")
-    s.add_argument("--limit", type=int, default=10); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("inventory", help="Show SDK, engine, GPU-driver, dependency-graph, and native-artifact inventory"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("subsystems", help="Rank likely failure subsystems and targeted validations"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("native-scan", help="Inspect native binaries and imported shared-library dependencies"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("graph", help="Show/export the structural failure graph")
-    s.add_argument("--format", choices=["text","json","dot"], default="text"); s.add_argument("-o", "--output")
-    s = sub.add_parser("explain", help="Explain one graph node, its risk evidence, and blast radius")
-    s.add_argument("node"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("validate-next", help="Show the highest-value validation to run next"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("validate-plan", help="Build a deduplicated, risk-prioritized validation sequence"); s.add_argument("--limit", type=int, default=5); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("impact", help="Show source files/components changed since the known-good baseline"); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("export", help="Export standalone HTML dashboard"); s.add_argument("-o", "--output", default="driftguard-report.html")
-    s = sub.add_parser("watch", help="Continuously detect changes"); s.add_argument("--interval", type=int, default=None)
-    s = sub.add_parser("serve", help="Run local dashboard"); s.add_argument("--port", type=int, default=8765)
-    return p
-
-
-def main() -> int:
-    args = build_parser().parse_args()
-    root = Path(args.root).resolve()
-    if not root.exists() or not root.is_dir():
-        print(f"Invalid project root: {root}", file=sys.stderr); return 2
-    if args.command == "init": return cmd_init(root, args.force)
-    if args.command == "check": return cmd_check(root, args.json)
-    if args.command == "predict": return cmd_predict(root, args.json)
-    if args.command == "doctor": return cmd_doctor(root, args.json)
-    if args.command == "record": return cmd_record(root, args.result, args.stage, args.note)
-    if args.command == "guard": return cmd_guard(root, args.cmd, args.max_risk, args.force, args.capture)
-    if args.command == "analyze-log": return cmd_analyze_log(root, Path(args.log_file), args.json, args.save)
-    if args.command == "incidents": return cmd_incidents(root, max(1, args.limit), args.json)
-    if args.command == "inventory": return cmd_inventory(root, args.json)
-    if args.command == "subsystems": return cmd_subsystems(root, args.json)
-    if args.command == "native-scan": return cmd_native_scan(root, args.json)
-    if args.command == "graph": return cmd_graph(root, args.format, Path(args.output) if args.output else None)
-    if args.command == "explain": return cmd_explain(root, args.node, args.json)
-    if args.command == "validate-next": return cmd_validate_next(root, args.json)
-    if args.command == "validate-plan": return cmd_validate_plan(root, max(1, args.limit), args.json)
-    if args.command == "impact": return cmd_impact(root, args.json)
-    if args.command == "export": return cmd_export(root, Path(args.output))
-    if args.command == "watch": return cmd_watch(root, max(1, args.interval or int(get_config(root).get("watch_interval", 10))))
-    if args.command == "serve": return cmd_serve(root, args.port)
-    return 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-)
+def _safe_validation_path(value: str) -> bool:
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/\\ -")
+    return bool(value) and all(ch in allowed for ch in value)
 
 
 def _portable_validation_command(command: str, shell: str) -> Optional[str]:
-    """Return a shell-safe portable command, or None when human execution is required."""
-    command = re.sub(r"\\s+", " ", str(command or "")).strip()
+    """Return a conservative portable command or None for a manual validation."""
+    command = " ".join(str(command or "").split())
     if not command or any(ch in command for ch in ("\n", "\r", chr(96), "$", ";", "|", "&", ">", "<")):
         return None
     if command in _SAFE_FIXED_VALIDATIONS:
         return command
-    m = _SAFE_PYTHON_MODULE_RE.match(command)
-    if m:
-        tail = m.group(1)
-        return (f'& $Python -m {tail}' if shell == "powershell" else f'"$PYTHON_BIN" -m {tail}')
-    m = _SAFE_PYTHON_COMPILE_RE.match(command)
-    if m:
-        target = m.group(1)
-        if shell == "powershell":
-            target = target.replace("'", "''")
-            return f"& $Python -m compileall -q -f '{target}'"
-        target = target.replace("'", "'\\''")
-        return f'"$PYTHON_BIN" -m compileall -q -f \'{target}\''
-    m = _SAFE_NODE_CHECK_RE.match(command)
-    if m:
-        target = m.group(1)
-        if shell == "powershell":
-            target = target.replace("'", "''")
-            return f"node --check '{target}'"
-        target = target.replace("'", "'\\''")
-        return f"node --check \'{target}\'"
-    if _SAFE_TOOL_VERSION_RE.match(command):
-        return command
+
+    if " -m " in command:
+        _python, tail = command.split(" -m ", 1)
+        if tail in {"pytest -q", "unittest discover -s tests -v", "pip check"}:
+            return f'& $Python -m {tail}' if shell == "powershell" else f'"$PYTHON_BIN" -m {tail}'
+        prefix = 'compileall -q -f "'
+        if tail.startswith(prefix) and tail.endswith('"'):
+            target = tail[len(prefix):-1]
+            if not _safe_validation_path(target):
+                return None
+            if shell == "powershell":
+                return f"& $Python -m compileall -q -f '{target}'"
+            return f'"$PYTHON_BIN" -m compileall -q -f \'{target}\''
+
+    node_prefix = 'node --check "'
+    if command.startswith(node_prefix) and command.endswith('"'):
+        target = command[len(node_prefix):-1]
+        if not _safe_validation_path(target):
+            return None
+        return f"node --check '{target}'"
+
     return None
 
 
@@ -3726,6 +3269,7 @@ def render_validation_script(plan: dict, shell: str) -> str:
     if shell not in {"bash", "powershell"}:
         raise ValueError("shell must be bash or powershell")
     steps = list(plan.get("steps", []) or [])
+
     if shell == "bash":
         lines = [
             "#!/usr/bin/env bash",
@@ -3865,6 +3409,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("node"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("validate-next", help="Show the highest-value validation to run next"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("validate-plan", help="Build a deduplicated, risk-prioritized validation sequence"); s.add_argument("--limit", type=int, default=5); s.add_argument("--json", action="store_true")
+    s = sub.add_parser("validation-script", help="Export the targeted validation plan as a reviewable shell script"); s.add_argument("--shell", choices=["bash","powershell"], required=True); s.add_argument("--limit", type=int, default=5); s.add_argument("-o", "--output")
     s = sub.add_parser("impact", help="Show source files/components changed since the known-good baseline"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("export", help="Export standalone HTML dashboard"); s.add_argument("-o", "--output", default="driftguard-report.html")
     s = sub.add_parser("watch", help="Continuously detect changes"); s.add_argument("--interval", type=int, default=None)
@@ -3892,6 +3437,7 @@ def main() -> int:
     if args.command == "explain": return cmd_explain(root, args.node, args.json)
     if args.command == "validate-next": return cmd_validate_next(root, args.json)
     if args.command == "validate-plan": return cmd_validate_plan(root, max(1, args.limit), args.json)
+    if args.command == "validation-script": return cmd_validation_script(root, args.shell, Path(args.output) if args.output else None, max(1, args.limit))
     if args.command == "impact": return cmd_impact(root, args.json)
     if args.command == "export": return cmd_export(root, Path(args.output))
     if args.command == "watch": return cmd_watch(root, max(1, args.interval or int(get_config(root).get("watch_interval", 10))))
