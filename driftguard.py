@@ -36,6 +36,7 @@ HISTORY_FILE = "history.jsonl"
 EVENTS_FILE = "events.jsonl"
 CONFIG_FILE = "config.json"
 INCIDENTS_FILE = "incidents.jsonl"
+VALIDATION_RUNS_FILE = "validation_runs.jsonl"
 LOG_DIR = "logs"
 
 DEFAULT_CONFIG = {
@@ -3332,6 +3333,203 @@ def cmd_validation_script(root: Path, shell: str, output: Optional[Path], limit:
     return 0
 
 
+def _validation_argv(command: str) -> Optional[List[str]]:
+    """Translate only DriftGuard's known generated validations to direct argv."""
+    command = " ".join(str(command or "").split())
+    if not command or any(ch in command for ch in ("\n", "\r", chr(96), "$", ";", "|", "&", ">", "<")):
+        return None
+
+    fixed = {
+        "npm test": ["npm", "test"],
+        "npm run build": ["npm", "run", "build"],
+        "npm ls --depth=0": ["npm", "ls", "--depth=0"],
+        "cargo test": ["cargo", "test"],
+        "cargo check": ["cargo", "check"],
+        "go test ./...": ["go", "test", "./..."],
+        "dotnet test": ["dotnet", "test"],
+        "dotnet --info": ["dotnet", "--info"],
+        "cmake --build build --config Debug": ["cmake", "--build", "build", "--config", "Debug"],
+        "nvcc --version": ["nvcc", "--version"],
+        "vulkaninfo --summary": ["vulkaninfo", "--summary"],
+        "adb version": ["adb", "version"],
+        "cl": ["cl"],
+        "msbuild -version": ["msbuild", "-version"],
+        "docker --version": ["docker", "--version"],
+        "git --version": ["git", "--version"],
+    }
+    if command in fixed:
+        return fixed[command]
+
+    if " -m " in command:
+        _python, tail = command.split(" -m ", 1)
+        if tail == "pytest -q":
+            return [sys.executable, "-m", "pytest", "-q"]
+        if tail == "unittest discover -s tests -v":
+            return [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"]
+        if tail == "pip check":
+            return [sys.executable, "-m", "pip", "check"]
+        prefix = 'compileall -q -f "'
+        if tail.startswith(prefix) and tail.endswith('"'):
+            target = tail[len(prefix):-1]
+            if _safe_validation_path(target):
+                return [sys.executable, "-m", "compileall", "-q", "-f", target]
+            return None
+
+    node_prefix = 'node --check "'
+    if command.startswith(node_prefix) and command.endswith('"'):
+        target = command[len(node_prefix):-1]
+        if _safe_validation_path(target):
+            return ["node", "--check", target]
+    return None
+
+
+def prepare_validation_execution(plan: dict) -> dict:
+    prepared = []
+    for step in list(plan.get("steps", []) or []):
+        argv = _validation_argv(str(step.get("command") or ""))
+        prepared.append({
+            "order": step.get("order"),
+            "node_id": step.get("primary_node"),
+            "risk": int(step.get("risk", 0) or 0),
+            "risk_label": step.get("risk_label"),
+            "command": step.get("command"),
+            "executable": argv is not None,
+            "argv": argv,
+        })
+    return {
+        "schema": 1,
+        "generated_at": now_iso(),
+        "step_count": len(prepared),
+        "executable_steps": sum(1 for step in prepared if step["executable"]),
+        "manual_steps": sum(1 for step in prepared if not step["executable"]),
+        "steps": prepared,
+    }
+
+
+def execute_validation_plan(root: Path, plan: dict, timeout_seconds: int = 900,
+                            continue_on_failure: bool = False) -> dict:
+    timeout_seconds = max(1, min(int(timeout_seconds), 86400))
+    prepared = prepare_validation_execution(plan)
+    results = []
+    stopped_early = False
+
+    for step in prepared["steps"]:
+        argv = step.get("argv")
+        base = {
+            "order": step.get("order"),
+            "node_id": step.get("node_id"),
+            "risk": step.get("risk"),
+            "risk_label": step.get("risk_label"),
+            "command": step.get("command"),
+            "argv": argv,
+        }
+        if not argv:
+            results.append({**base, "status": "manual", "exit_code": None, "duration_seconds": 0.0})
+            continue
+
+        started = time.perf_counter()
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(root), text=True, capture_output=True,
+                timeout=timeout_seconds,
+            )
+            duration = round(time.perf_counter() - started, 3)
+            status = "passed" if proc.returncode == 0 else "failed"
+            result = {
+                **base,
+                "status": status,
+                "exit_code": proc.returncode,
+                "duration_seconds": duration,
+                "stdout_tail": (proc.stdout or "")[-6000:],
+                "stderr_tail": (proc.stderr or "")[-6000:],
+            }
+        except FileNotFoundError as e:
+            result = {
+                **base,
+                "status": "tool-missing",
+                "exit_code": 127,
+                "duration_seconds": round(time.perf_counter() - started, 3),
+                "stdout_tail": "",
+                "stderr_tail": str(e),
+            }
+        except subprocess.TimeoutExpired as e:
+            result = {
+                **base,
+                "status": "timeout",
+                "exit_code": 124,
+                "duration_seconds": round(time.perf_counter() - started, 3),
+                "stdout_tail": str(e.stdout or "")[-6000:],
+                "stderr_tail": str(e.stderr or "")[-6000:],
+            }
+        results.append(result)
+        if result["status"] != "passed" and not continue_on_failure:
+            stopped_early = True
+            break
+
+    executed = [r for r in results if r.get("status") != "manual"]
+    failed = [r for r in executed if r.get("status") != "passed"]
+    manual = [r for r in results if r.get("status") == "manual"]
+    return {
+        "schema": 1,
+        "generated_at": now_iso(),
+        "project_root": str(root.resolve()),
+        "timeout_seconds": timeout_seconds,
+        "continue_on_failure": bool(continue_on_failure),
+        "stopped_early": stopped_early,
+        "planned_steps": prepared["step_count"],
+        "executed_steps": len(executed),
+        "manual_steps": len(manual),
+        "failed_steps": len(failed),
+        "complete": not manual and not stopped_early and len(results) == prepared["step_count"],
+        "passed": not failed,
+        "results": results,
+    }
+
+
+def cmd_validate_run(root: Path, limit: int, timeout_seconds: int, continue_on_failure: bool,
+                     execute: bool, json_output: bool, save: bool) -> int:
+    try:
+        report = make_report(root)
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    plan = build_validation_plan(report, limit)
+    if not execute:
+        payload = prepare_validation_execution(plan)
+        payload["execution_requested"] = False
+        if json_output:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"Validation run dry-run: {payload['executable_steps']} executable, {payload['manual_steps']} manual")
+            for step in payload["steps"]:
+                mode = "EXEC" if step["executable"] else "MANUAL"
+                print(f"{step.get('order')}. [{mode}] {step.get('command')}")
+            print("Nothing executed. Re-run with --execute to run allowlisted steps directly without a shell.")
+        if save:
+            ensure_state(root)
+            append_jsonl(state_path(root, VALIDATION_RUNS_FILE), payload)
+        return 0
+
+    payload = execute_validation_plan(root, plan, timeout_seconds, continue_on_failure)
+    payload["execution_requested"] = True
+    if save:
+        ensure_state(root)
+        append_jsonl(state_path(root, VALIDATION_RUNS_FILE), payload)
+    if json_output:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Validation run: {payload['executed_steps']} executed, {payload['manual_steps']} manual, {payload['failed_steps']} failed")
+        for result in payload["results"]:
+            status = str(result.get("status") or "").upper()
+            print(f"{result.get('order')}. [{status}] {result.get('command')}")
+            if result.get("exit_code") is not None:
+                print(f"   exit={result.get('exit_code')} duration={result.get('duration_seconds')}s")
+        if payload["manual_steps"]:
+            print("Manual steps remain; use validation-script to export the full reviewable plan.")
+    return 1 if payload["failed_steps"] else 0
+
+
 _report_html_v5 = report_html
 
 
@@ -3410,6 +3608,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("validate-next", help="Show the highest-value validation to run next"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("validate-plan", help="Build a deduplicated, risk-prioritized validation sequence"); s.add_argument("--limit", type=int, default=5); s.add_argument("--json", action="store_true")
     s = sub.add_parser("validation-script", help="Export the targeted validation plan as a reviewable shell script"); s.add_argument("--shell", choices=["bash","powershell"], required=True); s.add_argument("--limit", type=int, default=5); s.add_argument("-o", "--output")
+    s = sub.add_parser("validate-run", help="Dry-run or explicitly execute allowlisted validation-plan steps"); s.add_argument("--limit", type=int, default=5); s.add_argument("--timeout", type=int, default=900); s.add_argument("--continue-on-failure", action="store_true"); s.add_argument("--execute", action="store_true"); s.add_argument("--json", action="store_true"); s.add_argument("--save", action="store_true")
     s = sub.add_parser("impact", help="Show source files/components changed since the known-good baseline"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("export", help="Export standalone HTML dashboard"); s.add_argument("-o", "--output", default="driftguard-report.html")
     s = sub.add_parser("watch", help="Continuously detect changes"); s.add_argument("--interval", type=int, default=None)
@@ -3438,6 +3637,7 @@ def main() -> int:
     if args.command == "validate-next": return cmd_validate_next(root, args.json)
     if args.command == "validate-plan": return cmd_validate_plan(root, max(1, args.limit), args.json)
     if args.command == "validation-script": return cmd_validation_script(root, args.shell, Path(args.output) if args.output else None, max(1, args.limit))
+    if args.command == "validate-run": return cmd_validate_run(root, max(1, args.limit), max(1, args.timeout), args.continue_on_failure, args.execute, args.json, args.save)
     if args.command == "impact": return cmd_impact(root, args.json)
     if args.command == "export": return cmd_export(root, Path(args.output))
     if args.command == "watch": return cmd_watch(root, max(1, args.interval or int(get_config(root).get("watch_interval", 10))))
