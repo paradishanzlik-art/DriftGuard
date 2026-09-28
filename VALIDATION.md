@@ -4,7 +4,7 @@ DriftGuard's local engineering behavior is tested, but that is not the same as p
 
 ## Gate 1 — clean installation
 
-Verify source install and wheel install in fresh environments on Windows and Linux across supported Python versions. Acceptance evidence should include CLI startup, `init`, `check`, `impact`, `validate-next`, `graph`, and one `guard --capture` execution.
+Verify source install and wheel install in fresh environments on Windows and Linux across supported Python versions. Acceptance evidence should include CLI startup, `init`, `check`, `impact`, `validate-next`, `validate-plan`, `graph`, and one `guard --capture` execution.
 
 ## Gate 2 — unfamiliar-repository evaluation
 
@@ -28,4 +28,9 @@ Before a tagged release, run the full suite, build from a clean tree, install in
 
 ## Current evidence
 
-v6 currently has 48 passing local automated tests. The Linux unfamiliar-repository campaign completed 10 known-good repositories: harmless source edits passed the selected validations and deliberate breaking edits failed them, with source-failure classification added from campaign findings. A clean wheel install and v5-baseline → v6-upgrade compatibility check also passed locally. A 30-pair Linux machine-time benchmark measured 0.344 s median structured-diagnosis overhead after removing a duplicate guard scan; classification remained correct in all 30 pairs. Guard semantics were exercised on Linux: no-baseline=2, policy block=3 without execution, command failures propagate their exit code, missing command=127, and `check` remains diagnostic. The current source ZIP and wheel also pass Linux release-hygiene checks plus v5→v6 rebaseline compatibility. Windows/second-OS evidence and a timed human diagnosis comparison remain open.
+The pinned v6.0.0 RC1 anchor is `release/v6-rc1` at `b12e67bb209bd2ae16d8b1b1af1bd5a67533f4e4`; that exact candidate has 48 passing automated tests. The Linux unfamiliar-repository campaign completed 10 known-good repositories: harmless source edits passed the selected validations and deliberate breaking edits failed them, with source-failure classification added from campaign findings. A clean wheel install and v5-baseline → v6-upgrade compatibility check also passed locally. A 30-pair Linux machine-time benchmark measured 0.344 s median structured-diagnosis overhead after removing a duplicate guard scan; classification remained correct in all 30 pairs. Guard semantics were exercised on Linux: no-baseline=2, policy block=3 without execution, command failures propagate their exit code, missing command=127, and `check` remains diagnostic. The current source ZIP and wheel also pass Linux release-hygiene checks plus v5→v6 rebaseline compatibility. Windows/second-OS evidence and a timed human diagnosis comparison remain open.
+
+
+## Development beyond RC1
+
+The active development branch is now 6.1.0 and adds `validate-plan`, report/dashboard validation-plan output, and a reusable `validation/validate_source_tree.py` harness for the commit-specific GitHub source-ZIP workaround. Four new planner regression tests are present. These post-RC1 changes are **not** counted as passing release evidence until an exact-source run executes the suite and wheel smoke checks; GitHub Actions remains excluded while runs end in `startup_failure` before jobs are created.
