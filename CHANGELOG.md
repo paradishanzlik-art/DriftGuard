@@ -11,7 +11,9 @@
 - Added a cross-platform source-tree validator for the commit-specific GitHub source-ZIP validation workaround.
 - Added `validation-script` for portable PowerShell/Bash validation scripts derived from `validate-plan`.
 - Script export uses conservative command allowlisting; ambiguous/descriptive validations are rendered as manual comments instead of executable shell text.
-- Added four exporter regression tests, bringing the branch to 57 defined tests.
+- Added four exporter regression tests.
+- Added opt-in `validate-run`: dry-run by default, explicit `--execute` for allowlisted validations, direct argv execution without a shell, bounded output capture, timeout handling, stop/continue policy, and optional JSONL evidence persistence.
+- Added five validation-run regression tests, bringing the branch to 62 defined tests.
 - Preserved `release/v6-rc1` as the pinned v6.0.0 validation anchor while continuing development on the feature branch.
 
 ## 6.0.0
