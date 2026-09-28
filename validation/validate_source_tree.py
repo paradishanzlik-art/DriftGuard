@@ -14,20 +14,23 @@ import tempfile
 from datetime import datetime, timezone
 
 
-def run_step(name: str, command: list[str], cwd: Path) -> dict:
+def run_step(name: str, command: list[str], cwd: Path, expected_exit_codes: tuple[int, ...] = (0,)) -> dict:
     started = datetime.now(timezone.utc)
     proc = subprocess.run(command, cwd=str(cwd), text=True, capture_output=True)
     ended = datetime.now(timezone.utc)
+    ok = proc.returncode in expected_exit_codes
     result = {
         "name": name,
         "command": command,
         "exit_code": proc.returncode,
+        "expected_exit_codes": list(expected_exit_codes),
+        "ok": ok,
         "duration_seconds": round((ended - started).total_seconds(), 3),
         "stdout_tail": proc.stdout[-6000:],
         "stderr_tail": proc.stderr[-6000:],
     }
-    print(f"[{'PASS' if proc.returncode == 0 else 'FAIL'}] {name} ({result['duration_seconds']}s)")
-    if proc.returncode != 0:
+    print(f"[{'PASS' if ok else 'FAIL'}] {name} ({result['duration_seconds']}s)")
+    if not ok:
         if result["stdout_tail"]:
             print(result["stdout_tail"])
         if result["stderr_tail"]:
@@ -106,7 +109,11 @@ def validate(root: Path, expected_commit: str | None, skip_wheel: bool) -> dict:
                 if steps[-1]["exit_code"] == 0:
                     steps.append(run_step(
                         "installed-import-smoke",
-                        [str(py), "-c", "import driftguard; print(driftguard.APP_VERSION)"],
+                        [
+                            str(py), "-c",
+                            "import driftguard,sys; print(driftguard.APP_VERSION); "
+                            "sys.exit(0 if driftguard.APP_VERSION == '6.1.0' else 1)",
+                        ],
                         temp,
                     ))
                     dg = executable_in_venv(venv_dir, "driftguard")
@@ -114,6 +121,90 @@ def validate(root: Path, expected_commit: str | None, skip_wheel: bool) -> dict:
                         "installed-cli-smoke",
                         [str(dg), "--help"],
                         temp,
+                    ))
+
+                    fixture = temp / "fixture"
+                    (fixture / "src").mkdir(parents=True)
+                    (fixture / "tests").mkdir()
+                    (fixture / "pyproject.toml").write_text(
+                        '[project]\nname = "fixture"\nversion = "0.0.0"\nrequires-python = ">=3.9"\n',
+                        encoding="utf-8",
+                    )
+                    (fixture / "src" / "app.py").write_text(
+                        "def value():\n    return 1\n",
+                        encoding="utf-8",
+                    )
+                    (fixture / "tests" / "test_app.py").write_text(
+                        "from pathlib import Path\n"
+                        "import sys\n"
+                        "import unittest\n"
+                        "sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))\n"
+                        "import app\n"
+                        "class T(unittest.TestCase):\n"
+                        "    def test_value(self):\n"
+                        "        self.assertEqual(app.value(), 1)\n",
+                        encoding="utf-8",
+                    )
+                    steps.append(run_step(
+                        "installed-fixture-init",
+                        [str(dg), "--root", str(fixture), "init"],
+                        fixture,
+                    ))
+                    (fixture / "src" / "app.py").write_text(
+                        "def value():\n    return 1\n\n# harmless edit\n",
+                        encoding="utf-8",
+                    )
+                    steps.append(run_step(
+                        "installed-validate-plan",
+                        [str(dg), "--root", str(fixture), "validate-plan", "--limit", "5", "--json"],
+                        fixture,
+                    ))
+                    script_path = fixture / ("validate.ps1" if os.name == "nt" else "validate.sh")
+                    shell_name = "powershell" if os.name == "nt" else "bash"
+                    steps.append(run_step(
+                        "installed-validation-script",
+                        [
+                            str(dg), "--root", str(fixture), "validation-script",
+                            "--shell", shell_name, "--limit", "5", "-o", str(script_path),
+                        ],
+                        fixture,
+                    ))
+                    if steps[-1]["ok"] and not script_path.is_file():
+                        steps.append({
+                            "name": "validation-script-present",
+                            "command": [],
+                            "exit_code": 1,
+                            "expected_exit_codes": [0],
+                            "ok": False,
+                            "duration_seconds": 0.0,
+                            "stdout_tail": "",
+                            "stderr_tail": "validation-script reported success but created no output file",
+                        })
+                    steps.append(run_step(
+                        "installed-validate-run-dry",
+                        [str(dg), "--root", str(fixture), "validate-run", "--limit", "5", "--json"],
+                        fixture,
+                    ))
+                    steps.append(run_step(
+                        "installed-validate-run-pass",
+                        [
+                            str(dg), "--root", str(fixture), "validate-run",
+                            "--limit", "5", "--timeout", "120", "--execute", "--save", "--json",
+                        ],
+                        fixture,
+                    ))
+                    (fixture / "src" / "app.py").write_text(
+                        "def value()\n    return 1\n",
+                        encoding="utf-8",
+                    )
+                    steps.append(run_step(
+                        "installed-validate-run-breaking",
+                        [
+                            str(dg), "--root", str(fixture), "validate-run",
+                            "--limit", "5", "--timeout", "120", "--execute", "--save", "--json",
+                        ],
+                        fixture,
+                        expected_exit_codes=(1,),
                     ))
             elif steps[-1]["exit_code"] == 0:
                 steps.append({
@@ -125,9 +216,9 @@ def validate(root: Path, expected_commit: str | None, skip_wheel: bool) -> dict:
                     "stderr_tail": "pip wheel exited successfully but produced no wheel",
                 })
 
-    passed = bool(steps) and all(step["exit_code"] == 0 for step in steps)
+    passed = bool(steps) and all(bool(step.get("ok", step.get("exit_code") == 0)) for step in steps)
     return {
-        "schema": 1,
+        "schema": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "python": sys.version,
         "platform": sys.platform,
