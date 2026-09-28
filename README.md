@@ -12,6 +12,7 @@ DriftGuard is a local, standard-library-first engineering reliability system for
 - `validate-plan` builds an ordered, deduplicated sequence of high-value validations across risky components.
 - The exported/local HTML report surfaces the validation plan alongside source-impact evidence.
 - `validation-script` exports the same plan as a reviewable PowerShell or Bash script. Only a conservative allowlist of known-safe generated commands is emitted as executable; unsupported or suspicious commands remain `# MANUAL:` comments.
+- `validate-run` is dry-run by default. With explicit `--execute`, it runs only allowlisted generated validations as direct argv (never through a shell), captures bounded stdout/stderr tails, and can append evidence to `.driftguard/validation_runs.jsonl` with `--save`.
 - Safe upgrade behavior for v5 baselines: source tracking requests a known-good rebaseline instead of creating a false risk spike.
 - Source edits remain distinct from environment drift; they only become graph risk when compared against the source-aware baseline.
 
@@ -27,6 +28,8 @@ driftguard --root . validate-next
 driftguard --root . validate-plan --limit 5
 driftguard --root . validation-script --shell powershell -o validate.ps1
 driftguard --root . validation-script --shell bash -o validate.sh
+driftguard --root . validate-run --limit 5          # dry-run only
+driftguard --root . validate-run --limit 5 --execute --save
 
 # execute the recommended/normal validation through DriftGuard
 driftguard --root . guard --capture -- python -m unittest discover -s tests -v
