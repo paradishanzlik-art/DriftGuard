@@ -1,6 +1,6 @@
-# DriftGuard 6
+# DriftGuard 6.1
 
-DriftGuard is a local, standard-library-first engineering reliability system for detecting environment drift, diagnosing failed builds, modeling structural failure paths, and now connecting **source-code changes to targeted validation**.
+DriftGuard is a local, standard-library-first engineering reliability system for detecting environment drift, diagnosing failed builds, modeling structural failure paths, connecting **source-code changes to targeted validation**, and turning graph risk into a **deduplicated validation plan**.
 
 ## What v6 adds
 
@@ -9,6 +9,7 @@ DriftGuard is a local, standard-library-first engineering reliability system for
 - `impact` command showing modified, added, and removed source files since the known-good baseline.
 - Source-component nodes in the failure graph.
 - `validate-next` can recommend a narrow test/build because of the source area that changed.
+- `validate-plan` builds an ordered, deduplicated sequence of high-value validations across risky components.
 - Safe upgrade behavior for v5 baselines: source tracking requests a known-good rebaseline instead of creating a false risk spike.
 - Source edits remain distinct from environment drift; they only become graph risk when compared against the source-aware baseline.
 
@@ -21,6 +22,7 @@ driftguard --root . init
 # after editing code
 driftguard --root . impact
 driftguard --root . validate-next
+driftguard --root . validate-plan --limit 5
 
 # execute the recommended/normal validation through DriftGuard
 driftguard --root . guard --capture -- python -m unittest discover -s tests -v
