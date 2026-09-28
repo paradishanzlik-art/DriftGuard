@@ -103,5 +103,44 @@ class DriftGuardV61Tests(unittest.TestCase):
         )
 
 
+    def test_render_validation_script_bash(self):
+        plan = {
+            "steps": [
+                {"order": 1, "primary_node": "source-component:python/src", "command": '"/usr/bin/python3" -m unittest discover -s tests -v'},
+                {"order": 2, "primary_node": "engine:unreal/5.6", "command": "Compile the affected Unreal Editor target/module for the pinned engine, then run relevant automation tests"},
+            ]
+        }
+        script = driftguard.render_validation_script(plan, "bash")
+        self.assertIn('PYTHON_BIN="', script)
+        self.assertIn('"$PYTHON_BIN" -m unittest discover -s tests -v', script)
+        self.assertIn("# MANUAL: Compile the affected Unreal Editor", script)
+
+    def test_render_validation_script_powershell(self):
+        plan = {
+            "steps": [
+                {"order": 1, "primary_node": "source-component:python/pkg", "command": '"/usr/bin/python3" -m compileall -q -f "pkg"'},
+                {"order": 2, "primary_node": "dependency:node/pkg", "command": "npm test"},
+            ]
+        }
+        script = driftguard.render_validation_script(plan, "powershell")
+        self.assertIn('$Python = if ($env:PYTHON)', script)
+        self.assertIn("& $Python -m compileall -q -f 'pkg'", script)
+        self.assertIn("npm test", script)
+        self.assertIn("if ($LASTEXITCODE -ne 0)", script)
+
+    def test_validation_script_rejects_shell_metacharacters(self):
+        self.assertIsNone(
+            driftguard._portable_validation_command('node --check "src/app.js;rm -rf /"', "bash")
+        )
+
+    def test_parser_accepts_validation_script(self):
+        parser = driftguard.build_parser()
+        args = parser.parse_args(["validation-script", "--shell", "powershell", "--limit", "4", "-o", "plan.ps1"])
+        self.assertEqual(args.command, "validation-script")
+        self.assertEqual(args.shell, "powershell")
+        self.assertEqual(args.limit, 4)
+        self.assertEqual(args.output, "plan.ps1")
+
+
 if __name__ == "__main__":
     unittest.main()
