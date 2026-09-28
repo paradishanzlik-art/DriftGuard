@@ -2724,7 +2724,7 @@ def report_html(root: Path, report: dict) -> str:
 # DriftGuard v6: source-change impact intelligence.
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "6.0.0"
+APP_VERSION = "6.1.0"
 
 SOURCE_SUFFIX_FAMILY = {
     ".py": "python", ".pyi": "python",
@@ -3104,6 +3104,118 @@ def cmd_validate_next(root: Path, json_output: bool) -> int:
     return 0
 
 
+def build_validation_plan(report: dict, limit: int = 5) -> dict:
+    """Return a bounded, deduplicated sequence of targeted validations.
+
+    The failure graph can rank many risky nodes that collapse to the same practical
+    validation command. A plan groups those nodes so engineers get broad coverage
+    without repeatedly running equivalent checks.
+    """
+    bounded_limit = max(1, min(int(limit), 20))
+    prediction = report.get("failure_graph_prediction", {}) or {}
+    ranked = list(prediction.get("ranked_nodes", []) or [])
+    grouped: Dict[str, dict] = {}
+
+    for row in ranked:
+        command = str(row.get("validation") or "").strip()
+        if not command:
+            continue
+        key = re.sub(r"\s+", " ", command).strip().lower()
+        if not key:
+            continue
+        entry = grouped.get(key)
+        node = {
+            "node_id": row.get("node_id"),
+            "kind": row.get("kind"),
+            "label": row.get("label"),
+            "risk": int(row.get("risk", 0) or 0),
+            "risk_label": row.get("risk_label"),
+            "direct": bool(row.get("direct")),
+            "blast_radius": int(row.get("blast_radius", 0) or 0),
+        }
+        if entry is None:
+            grouped[key] = {
+                "command": command,
+                "risk": node["risk"],
+                "risk_label": row.get("risk_label"),
+                "primary_node": row.get("node_id"),
+                "primary_reason": (row.get("reasons") or ["highest graph risk"])[0],
+                "direct": bool(row.get("direct")),
+                "blast_radius": node["blast_radius"],
+                "nodes": [node],
+            }
+        else:
+            entry["nodes"].append(node)
+            entry["direct"] = bool(entry.get("direct") or row.get("direct"))
+            entry["blast_radius"] = max(int(entry.get("blast_radius", 0)), node["blast_radius"])
+            if node["risk"] > int(entry.get("risk", 0)):
+                entry["risk"] = node["risk"]
+                entry["risk_label"] = row.get("risk_label")
+                entry["primary_node"] = row.get("node_id")
+                entry["primary_reason"] = (row.get("reasons") or ["highest graph risk"])[0]
+
+    steps = list(grouped.values())
+    steps.sort(key=lambda x: (
+        -int(x.get("risk", 0)),
+        -int(bool(x.get("direct"))),
+        -int(x.get("blast_radius", 0)),
+        str(x.get("command", "")),
+    ))
+    steps = steps[:bounded_limit]
+    for index, step in enumerate(steps, 1):
+        step["order"] = index
+        step["covered_nodes"] = len(step.get("nodes", []))
+
+    risky_with_validation = sum(1 for row in ranked if str(row.get("validation") or "").strip())
+    covered_node_ids = {
+        node.get("node_id")
+        for step in steps
+        for node in step.get("nodes", [])
+        if node.get("node_id")
+    }
+    impact = report.get("source_impact", {}) or {}
+    return {
+        "schema": 1,
+        "limit": bounded_limit,
+        "step_count": len(steps),
+        "steps": steps,
+        "coverage": {
+            "risky_nodes_with_validation": risky_with_validation,
+            "covered_risky_nodes": len(covered_node_ids),
+        },
+        "source_changes": {
+            "total": int(impact.get("total_changes", 0) or 0),
+            "components": list(impact.get("changed_components", []) or [])[:40],
+        },
+        "fallback": None if steps else "Run the normal project test/build suite.",
+    }
+
+
+def cmd_validate_plan(root: Path, limit: int, json_output: bool) -> int:
+    try:
+        report = make_report(root)
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    plan = build_validation_plan(report, limit)
+    if json_output:
+        print(json.dumps(plan, indent=2))
+        return 0
+    if not plan.get("steps"):
+        print(plan.get("fallback") or "No targeted validation plan is required.")
+        return 0
+    print(f"Validation plan: {plan['step_count']} step(s)")
+    source = plan.get("source_changes", {})
+    if source.get("total"):
+        print(f"Source changes: {source['total']} across {len(source.get('components', []))} component(s)")
+    for step in plan["steps"]:
+        print(f"{step['order']}. [{step.get('risk_label') or 'RISK'} {step.get('risk', 0)}/100] {step['command']}")
+        print(f"   Covers {step.get('covered_nodes', 0)} risky node(s); primary: {step.get('primary_node')}")
+        if step.get("primary_reason"):
+            print(f"   Reason: {step['primary_reason']}")
+    return 1 if any(int(step.get("risk", 0)) >= 75 for step in plan["steps"]) else 0
+
+
 _report_html_v5 = report_html
 
 
@@ -3156,6 +3268,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("explain", help="Explain one graph node, its risk evidence, and blast radius")
     s.add_argument("node"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("validate-next", help="Show the highest-value validation to run next"); s.add_argument("--json", action="store_true")
+    s = sub.add_parser("validate-plan", help="Build a deduplicated, risk-prioritized validation sequence"); s.add_argument("--limit", type=int, default=5); s.add_argument("--json", action="store_true")
     s = sub.add_parser("impact", help="Show source files/components changed since the known-good baseline"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("export", help="Export standalone HTML dashboard"); s.add_argument("-o", "--output", default="driftguard-report.html")
     s = sub.add_parser("watch", help="Continuously detect changes"); s.add_argument("--interval", type=int, default=None)
@@ -3182,6 +3295,7 @@ def main() -> int:
     if args.command == "graph": return cmd_graph(root, args.format, Path(args.output) if args.output else None)
     if args.command == "explain": return cmd_explain(root, args.node, args.json)
     if args.command == "validate-next": return cmd_validate_next(root, args.json)
+    if args.command == "validate-plan": return cmd_validate_plan(root, max(1, args.limit), args.json)
     if args.command == "impact": return cmd_impact(root, args.json)
     if args.command == "export": return cmd_export(root, Path(args.output))
     if args.command == "watch": return cmd_watch(root, max(1, args.interval or int(get_config(root).get("watch_interval", 10))))
