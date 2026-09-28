@@ -7,6 +7,8 @@
 - Orders validation steps by risk, direct evidence, and blast radius so high-value checks run first.
 - Added JSON output with plan coverage and changed-source component context.
 - Added four regression tests for command deduplication, ordering/limits, safe fallback, and CLI parsing.
+- Added validation-plan data to reports and the local/exported HTML dashboard.
+- Added a cross-platform source-tree validator for the commit-specific GitHub source-ZIP validation workaround.
 - Preserved `release/v6-rc1` as the pinned v6.0.0 validation anchor while continuing development on the feature branch.
 
 ## 6.0.0
