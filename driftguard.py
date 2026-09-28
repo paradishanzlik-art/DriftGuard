@@ -3122,7 +3122,7 @@ def build_validation_plan(report: dict, limit: int = 5) -> dict:
         command = str(row.get("validation") or "").strip()
         if not command:
             continue
-        key = re.sub(r"\s+", " ", command).strip().lower()
+        key = re.sub(r"\s+", " ", command).strip()
         if not key:
             continue
         entry = grouped.get(key)
