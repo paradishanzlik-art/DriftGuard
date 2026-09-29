@@ -18,6 +18,7 @@ The [sanitized machine-readable result](RELEASE_GATE_6_1_2026-09-29.json) contai
 - Native Windows execution of `validation/windows_smoke.ps1` and second-OS repository cases.
 - Timed human diagnosis comparison; the earlier 0.344 s measurement is machine-time overhead only.
 - GitHub Actions `startup_failure` with zero jobs. No CI pass is claimed.
-- License selection before publication as reusable open-source software.
+
+Licensing is no longer an open gate: the repository uses the Apache License 2.0.
 
 This evidence supports a bounded public demo of 6.1 on Linux. It does not establish calibrated failure probabilities or production-grade support for every scanned source family.
