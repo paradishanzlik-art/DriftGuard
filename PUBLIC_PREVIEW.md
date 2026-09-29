@@ -18,7 +18,7 @@ Suggested description:
 - Use the disposable demo or a repository you can disclose. Inspect exported HTML/JSON, incident logs, and `.driftguard/` before posting: they can contain absolute paths and captured build output.
 - Record a baseline only after the project's normal validation passes. A baseline is a snapshot, not an automated proof of correctness.
 - Review `validate-run` in dry-run mode before `--execute`. Allowlisted commands such as `npm test` can execute scripts defined by the target project.
-- If publishing the source repository, choose and add an explicit license. No license terms have been selected in this branch.
+- The source is licensed under Apache License 2.0; preserve the license and applicable notices when redistributing it.
 - Keep the Windows, diagnosis-time, and GitHub Actions limitations visible beside the claims; do not use a green CI badge while jobs fail before starting.
 
 ## Release gates still open
@@ -29,6 +29,7 @@ Suggested description:
 | Native Windows | Run `validation/windows_smoke.ps1` on a real Windows host; retain its JSON evidence |
 | Human diagnosis-time study | Conduct the prepared counterbalanced study; do not infer time saved from command overhead |
 | GitHub Actions | Resolve the zero-job `startup_failure` before counting a CI matrix as evidence |
-| License and visibility | Owner chooses terms and whether/when the private repository becomes public |
+| License | Completed: Apache License 2.0 |
+| Repository visibility | Owner chooses whether/when the private repository becomes public |
 
 These open gates limit release and marketing claims. They do not prevent showing the bounded demo with the stated context.
