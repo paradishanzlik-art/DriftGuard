@@ -12,6 +12,14 @@ From a source checkout, run:
 python examples/showcase.py
 ```
 
+For a screen recording or live walkthrough, use presentation mode:
+
+```sh
+python examples/showcase.py --present
+```
+
+Presentation mode prints each stage, the representative DriftGuard command, the targeted validation plan, execution status, the deliberate source break, and the detected failure with short pauses between stages.
+
 The standard-library-only demo creates a disposable Python project, establishes a passing baseline, makes a harmless edit, previews and runs the recommended checks, then introduces a syntax error and verifies that the check fails. It cleans up its temporary project afterward. A successful run prints:
 
 ```text
