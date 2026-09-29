@@ -33,7 +33,7 @@ The pinned v6.0.0 RC1 anchor is `release/v6-rc1` at `b12e67bb209bd2ae16d8b1b1af1
 
 ## Development beyond RC1
 
-The active development branch is now 6.1.0 and adds `validate-plan`, report/dashboard validation-plan output, and a reusable `validation/validate_source_tree.py` harness for the commit-specific GitHub source-ZIP workaround. Five new planner regression tests are present; the branch currently defines 62 tests in total. These post-RC1 changes are **not** counted as passing release evidence until an exact-source run executes the suite and wheel smoke checks; GitHub Actions remains excluded while runs end in `startup_failure` before jobs are created.
+The active development branch is now 6.1.0 and adds `validate-plan`, report/dashboard validation-plan output, and a reusable `validation/validate_source_tree.py` harness for exact-source validation. It currently defines 65 automated tests. GitHub Actions remains excluded while runs end in `startup_failure` before jobs are created.
 
 
 ## Portable plan export
@@ -49,3 +49,9 @@ The 6.1 branch adds `validate-run`. It is a dry-run unless `--execute` is suppli
 ## Expanded exact-source and Windows gates
 
 The source-ZIP harness now exercises the installed 6.1 wheel against a temporary Python fixture: baseline, harmless source change, `validate-plan`, platform-appropriate `validation-script`, dry-run `validate-run`, successful explicit execution with saved evidence, then a deliberate syntax break whose `validate-run` must fail with exit 1. The native Windows harness mirrors the 6.1 plan/export/execute checks and accepts an explicit expected commit value instead of embedding a stale source SHA.
+
+## 6.1 local development check — 2026-09-29
+
+On Linux with Python 3.12.14, the updated development tree passed **65/65** unit/regression tests, built a wheel, installed it into a fresh offline virtual environment, and passed 14 validation harness steps. The harness now checks the JSON plan, dry-run behavior, pass/fail results, and saved JSONL evidence rather than trusting exit codes alone. `python examples/showcase.py` also passed its disposable harmless-edit and syntax-break sequence.
+
+This local check is development evidence. The exact committed-tree check, including per-file Git-blob identity and the commit SHA, will be recorded separately before the 6.1 candidate is treated as verified. Native Windows execution, timed human diagnosis, and Actions remain open.

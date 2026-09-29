@@ -2,6 +2,13 @@
 
 ## 6.1.0
 
+- Fixed a missing test import found by running the exact development source; the full suite now executes.
+- Escaped project-derived labels in exported Bash/PowerShell scripts and restricted generated file checks to paths inside the target project.
+- Added regression tests for script-label injection and path traversal/option confusion.
+- Added a disposable end-to-end showcase and a public preview guide with measured claims and release gates.
+- Strengthened the installed-wheel validation harness to check JSON outcomes and saved pass/fail evidence, not just process exit codes.
+- Marked manual-only or otherwise incomplete explicit validation runs as incomplete instead of passed; the CLI returns 4 when manual work remains.
+- Kept generated script output compatible with Python 3.9 by using `Path.open(newline=...)`.
 - Added `validate-plan` to build a bounded sequence of targeted validations from graph risk.
 - Deduplicates equivalent validation commands while retaining the risky nodes each step covers.
 - Orders validation steps by risk, direct evidence, and blast radius so high-value checks run first.

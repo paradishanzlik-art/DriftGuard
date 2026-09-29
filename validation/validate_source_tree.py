@@ -206,6 +206,50 @@ def validate(root: Path, expected_commit: str | None, skip_wheel: bool) -> dict:
                         fixture,
                         expected_exit_codes=(1,),
                     ))
+                    # An exit code alone is weak evidence: an unrelated CLI
+                    # crash could also return 1. Verify the reported outcome
+                    # and the evidence written by the installed package.
+                    semantic_errors = []
+                    observed = {}
+                    for name in (
+                        "installed-validate-plan", "installed-validate-run-dry",
+                        "installed-validate-run-pass", "installed-validate-run-breaking",
+                    ):
+                        step = next(s for s in steps if s["name"] == name)
+                        try:
+                            observed[name] = json.loads(step["stdout_tail"])
+                        except (ValueError, TypeError):
+                            semantic_errors.append(f"{name} did not produce valid JSON")
+                    plan = observed.get("installed-validate-plan", {})
+                    dry = observed.get("installed-validate-run-dry", {})
+                    passing = observed.get("installed-validate-run-pass", {})
+                    breaking = observed.get("installed-validate-run-breaking", {})
+                    if plan.get("step_count", 0) < 1:
+                        semantic_errors.append("source change produced no validation plan")
+                    if dry.get("execution_requested") is not False or dry.get("executable_steps", 0) < 1:
+                        semantic_errors.append("dry-run did not report executable steps without executing")
+                    if passing.get("execution_requested") is not True or not passing.get("passed") or passing.get("executed_steps", 0) < 1:
+                        semantic_errors.append("harmless source validation did not execute and pass")
+                    if breaking.get("execution_requested") is not True or breaking.get("failed_steps", 0) < 1 or breaking.get("passed") is not False:
+                        semantic_errors.append("deliberate syntax break was not reported as a failed validation")
+                    evidence_path = fixture / ".driftguard" / "validation_runs.jsonl"
+                    try:
+                        evidence = [json.loads(line) for line in evidence_path.read_text(encoding="utf-8").splitlines()]
+                        if len(evidence) < 2 or not evidence[-2].get("passed") or evidence[-1].get("failed_steps", 0) < 1:
+                            semantic_errors.append("saved validation evidence does not contain pass and failure")
+                    except (OSError, ValueError):
+                        semantic_errors.append("saved validation evidence is absent or invalid")
+                    steps.append({
+                        "name": "installed-validation-semantics",
+                        "command": [],
+                        "exit_code": 1 if semantic_errors else 0,
+                        "expected_exit_codes": [0],
+                        "ok": not semantic_errors,
+                        "duration_seconds": 0.0,
+                        "stdout_tail": "Pass and failure outcomes verified" if not semantic_errors else "",
+                        "stderr_tail": "; ".join(semantic_errors),
+                    })
+                    print(f"[{'PASS' if not semantic_errors else 'FAIL'}] installed-validation-semantics")
             elif steps[-1]["exit_code"] == 0:
                 steps.append({
                     "name": "wheel-present",

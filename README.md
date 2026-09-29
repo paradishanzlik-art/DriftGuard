@@ -1,67 +1,75 @@
-# DriftGuard 6.1
+# DriftGuard
 
-DriftGuard is a local, standard-library-first engineering reliability system for detecting environment drift, diagnosing failed builds, modeling structural failure paths, connecting **source-code changes to targeted validation**, and turning graph risk into a **deduplicated validation plan**.
+**See what changed, choose a useful check, and explain a failed build.**
 
-## What v6 adds
+DriftGuard is a local Python CLI for engineering projects. It records a known-good baseline, detects environment and source changes, ranks affected components in a failure graph, and suggests targeted validations. Its `guard` command can run your normal build or tests and classify captured failures. It does not install or change dependencies.
 
-- Bounded source-file fingerprints for Python, Node/TypeScript, C/C++, Rust, Go, .NET, Java/Kotlin, CUDA, Vulkan/shader, Unreal, and Unity source families.
-- Logical source components such as `python/src` instead of treating every file as an isolated graph node.
-- `impact` command showing modified, added, and removed source files since the known-good baseline.
-- Source-component nodes in the failure graph.
-- `validate-next` can recommend a narrow test/build because of the source area that changed.
-- `validate-plan` builds an ordered, deduplicated sequence of high-value validations across risky components.
-- The exported/local HTML report surfaces the validation plan alongside source-impact evidence.
-- `validation-script` exports the same plan as a reviewable PowerShell or Bash script. Only a conservative allowlist of known-safe generated commands is emitted as executable; unsupported or suspicious commands remain `# MANUAL:` comments.
-- `validate-run` is dry-run by default. With explicit `--execute`, it runs only allowlisted generated validations as direct argv (never through a shell), captures bounded stdout/stderr tails, and can append evidence to `.driftguard/validation_runs.jsonl` with `--save`.
-- Safe upgrade behavior for v5 baselines: source tracking requests a known-good rebaseline instead of creating a false risk spike.
-- Source edits remain distinct from environment drift; they only become graph risk when compared against the source-aware baseline.
+## Try the complete demo
 
-## Quick start
+From a source checkout, run:
 
-```powershell
+```sh
+python examples/showcase.py
+```
+
+The standard-library-only demo creates a disposable Python project, establishes a passing baseline, makes a harmless edit, previews and runs the recommended checks, then introduces a syntax error and verifies that the check fails. It cleans up its temporary project afterward. A successful run prints:
+
+```text
+DriftGuard 6.1 disposable showcase
+Source changes found: 1
+Targeted validation steps: 2
+Dry-run executed: False
+Harmless change validation passed: True
+Deliberate syntax failure caught: True
+All project files and DriftGuard state were removed after this run.
+```
+
+## Use it on your project
+
+Python 3.9 or newer is required; DriftGuard itself has no runtime package dependencies.
+
+```sh
 python -m pip install .
+
+# Run your own project's test/build first; init records the current state as known-good.
 driftguard --root . init
 
-# after editing code
+# After a change:
 driftguard --root . impact
-driftguard --root . validate-next
 driftguard --root . validate-plan --limit 5
-driftguard --root . validation-script --shell powershell -o validate.ps1
-driftguard --root . validation-script --shell bash -o validate.sh
-driftguard --root . validate-run --limit 5          # dry-run only
-driftguard --root . validate-run --limit 5 --execute --save
+driftguard --root . validate-run --limit 5             # preview only
+driftguard --root . validate-run --limit 5 --execute   # run allowlisted checks
 
-# execute the recommended/normal validation through DriftGuard
+# Wrap the normal project test command and diagnose any captured failure:
 driftguard --root . guard --capture -- python -m unittest discover -s tests -v
 ```
 
-Other useful commands:
+The `--execute` option may run a project's test or build scripts. Review the dry-run plan before using it. `validate-run --execute` returns 1 for a failed check and 4 when manual steps remain incomplete. `guard` returns the wrapped command's exit code; a preflight policy block returns 3. See [validation and exit semantics](VALIDATION.md).
 
-```powershell
-driftguard --root . check
-driftguard --root . predict
-driftguard --root . inventory
-driftguard --root . subsystems
-driftguard --root . native-scan
-driftguard --root . graph --format dot -o driftguard.dot
-driftguard --root . explain source-component:python/src
-driftguard --root . serve --port 8765
-```
+| Command | Result |
+| --- | --- |
+| `check --json` | Environment drift, findings, and inspectable risk drivers |
+| `impact --json` | Added, modified, and removed source since the baseline |
+| `validate-next --json` | One targeted next check |
+| `validate-plan --json` | Ordered checks with overlapping graph nodes deduplicated |
+| `validation-script --shell bash -o validate.sh` | Reviewable script; unsupported checks stay as manual comments |
+| `validate-run --json` | Dry-run plan, or direct-argv execution with explicit `--execute` |
+| `graph --format dot -o driftguard.dot` | Structural failure graph for inspection |
+| `guard --capture -- <command>` | Preflight, wrapped command, captured failure diagnosis |
+| `export -o report.html` | Standalone local report; review its contents before sharing |
 
-## Verified development evidence
+Use `driftguard --help` for the full command list. Project state and captured logs live in `.driftguard/`, which should stay out of version control. Reports and logs can contain local paths or project output; review or redact them before posting.
 
-The v6 development branch passes 48 local automated tests. A Linux unfamiliar-repository campaign completed 10 known-good repositories, with harmless and deliberately breaking source edits exercising targeted validation. Clean wheel build/install and v5-baseline → v6-upgrade compatibility were also verified. Windows/second-OS validation remains pending. On the 10-repository Linux campaign, structured diagnosis added a 0.344 s median machine-time overhead after eliminating a duplicate project scan; this is not a human troubleshooting-time measurement. These are implementation checks, not proof that the risk score is calibrated to real-world failure probability.
+## Evidence and scope
 
-When GitHub Actions cannot create runner jobs, validate a commit-specific GitHub source ZIP locally with:
+The pinned 6.0 RC1 at commit `b12e67bb209bd2ae16d8b1b1af1bd5a67533f4e4` passed 48 automated tests and a Linux campaign on 10 unfamiliar known-good repositories. In those 10 cases, harmless source edits passed selected validations and deliberate breaking edits failed them. A 30-pair Linux benchmark measured **0.344 s median added machine time** to obtain a structured diagnosis after a performance fix. That number does not measure time saved for a human engineer.
 
-```powershell
-python validation/validate_source_tree.py --expected-commit <full-commit-sha> --json-out validation-result.json
-```
+The 6.1 branch adds the validation plan, script export, and opt-in execution shown above. Its source suite and installed-wheel behavior are checked by [`validation/validate_source_tree.py`](validation/validate_source_tree.py), including a deliberate failing validation. The [validation record](VALIDATION.md) distinguishes current 6.1 evidence from the earlier RC1.
 
-This checks archive identity, forced compilation, the unit/regression suite, wheel build, fresh virtual-environment install, import, and CLI startup without treating Actions as evidence.
+Risk scores are heuristic rankings, **not calibrated probabilities of build failure**. Native Windows and broader second-OS evaluation, a timed human diagnosis study, and functioning GitHub Actions runners remain open gates. The repository's Actions runs have ended before jobs start; they are not counted as passing CI. See [remaining validation gates](VALIDATION.md) and the [public preview guide](PUBLIC_PREVIEW.md).
 
-See `VALIDATION.md` for the remaining product-validation gates.
+## How it works
 
-## Safety
+DriftGuard samples bounded source fingerprints and project configuration, plus available SDK, toolchain, dependency, GPU, and native-binary metadata. It compares the current snapshot with the baseline, connects changes to logical components and graph nodes, then proposes checks for the affected areas. Supported source-family detection includes Python, Node/TypeScript, C/C++, Rust, Go, .NET, Java/Kotlin, CUDA, shaders, Unreal, and Unity; command generation and validation coverage vary by family. Unsupported engine or project-specific checks are marked for manual review.
 
-DriftGuard diagnoses before mutating. It does not automatically install, upgrade, downgrade, delete, or rewrite SDKs or dependencies. Risk outputs are inspectable engineering hypotheses and should be confirmed with the recommended validation.
+See the [changelog](CHANGELOG.md) for version history. This repository has no license grant yet; the owner must choose terms before publishing it as reusable open-source software.

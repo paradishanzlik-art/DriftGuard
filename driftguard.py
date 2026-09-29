@@ -3231,7 +3231,18 @@ _SAFE_FIXED_VALIDATIONS = {
 
 def _safe_validation_path(value: str) -> bool:
     allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/\\ -")
-    return bool(value) and all(ch in allowed for ch in value)
+    if not value or any(ch not in allowed for ch in value):
+        return False
+    normalized = value.replace("\\", "/")
+    if normalized == ".":
+        return True
+    # These paths are generated from a project scan. Do not let an exported
+    # script or explicit validation run walk outside that project or interpret
+    # a filename as another command-line option.
+    return (
+        not normalized.startswith(("/", "-"))
+        and all(part not in {"", ".", ".."} for part in normalized.split("/"))
+    )
 
 
 def _portable_validation_command(command: str, shell: str) -> Optional[str]:
@@ -3282,8 +3293,8 @@ def render_validation_script(plan: dict, shell: str) -> str:
         for step in steps:
             command = str(step.get("command") or "")
             portable = _portable_validation_command(command, shell)
-            label = f"{step.get('order', '?')}. {step.get('primary_node') or 'validation'}"
-            lines.extend(["", f"echo '==> {label}'"])
+            label = " ".join(f"{step.get('order', '?')}. {step.get('primary_node') or 'validation'}".split())
+            lines.extend(["", f"echo {shlex.quote('==> ' + label)}"])
             if portable:
                 lines.append(portable)
             else:
@@ -3302,7 +3313,7 @@ def render_validation_script(plan: dict, shell: str) -> str:
     for step in steps:
         command = str(step.get("command") or "")
         portable = _portable_validation_command(command, shell)
-        label = f"{step.get('order', '?')}. {step.get('primary_node') or 'validation'}"
+        label = " ".join(f"{step.get('order', '?')}. {step.get('primary_node') or 'validation'}".split())
         label_ps = label.replace("'", "''")
         lines.extend(["", f"Write-Host '==> {label_ps}'"])
         if portable:
@@ -3326,7 +3337,10 @@ def cmd_validation_script(root: Path, shell: str, output: Optional[Path], limit:
     script = render_validation_script(plan, shell)
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(script, encoding="utf-8", newline="\n")
+        # Path.write_text(newline=...) requires Python 3.10; our package
+        # supports 3.9, where Path.open already accepts newline.
+        with output.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(script)
         print(f"Wrote {shell} validation script: {output.resolve()}")
     else:
         print(script, end="")
@@ -3469,6 +3483,7 @@ def execute_validation_plan(root: Path, plan: dict, timeout_seconds: int = 900,
     executed = [r for r in results if r.get("status") != "manual"]
     failed = [r for r in executed if r.get("status") != "passed"]
     manual = [r for r in results if r.get("status") == "manual"]
+    complete = not manual and not stopped_early and len(results) == prepared["step_count"]
     return {
         "schema": 1,
         "generated_at": now_iso(),
@@ -3480,8 +3495,8 @@ def execute_validation_plan(root: Path, plan: dict, timeout_seconds: int = 900,
         "executed_steps": len(executed),
         "manual_steps": len(manual),
         "failed_steps": len(failed),
-        "complete": not manual and not stopped_early and len(results) == prepared["step_count"],
-        "passed": not failed,
+        "complete": complete,
+        "passed": not failed and complete,
         "results": results,
     }
 
@@ -3527,7 +3542,9 @@ def cmd_validate_run(root: Path, limit: int, timeout_seconds: int, continue_on_f
                 print(f"   exit={result.get('exit_code')} duration={result.get('duration_seconds')}s")
         if payload["manual_steps"]:
             print("Manual steps remain; use validation-script to export the full reviewable plan.")
-    return 1 if payload["failed_steps"] else 0
+    if payload["failed_steps"]:
+        return 1
+    return 0 if payload["complete"] else 4
 
 
 _report_html_v5 = report_html

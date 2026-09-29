@@ -1,6 +1,9 @@
 import unittest
 from pathlib import Path
+import shutil
+import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import driftguard
@@ -133,6 +136,29 @@ class DriftGuardV61Tests(unittest.TestCase):
             driftguard._portable_validation_command('node --check "src/app.js;rm -rf /"', "bash")
         )
 
+    def test_validation_paths_cannot_escape_project_or_become_options(self):
+        for target in ("../outside", "src/../outside", "/tmp/outside", "-flag", "src//other", "C:\\private"):
+            command = f'python -m compileall -q -f "{target}"'
+            with self.subTest(target=target):
+                self.assertIsNone(driftguard._validation_argv(command))
+                self.assertIsNone(driftguard._portable_validation_command(command, "bash"))
+        self.assertIsNotNone(driftguard._validation_argv('python -m compileall -q -f "."'))
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash required for generated-script execution")
+    def test_generated_bash_label_cannot_execute_project_text(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "injected"
+            label = f"source'; touch '{marker}'; echo '"
+            script = driftguard.render_validation_script({
+                "steps": [{"order": 1, "primary_node": label, "command": "Manual validation"}],
+            }, "bash")
+            path = Path(td) / "validate.sh"
+            path.write_text(script, encoding="utf-8")
+            proc = subprocess.run(["bash", str(path)], cwd=td, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertFalse(marker.exists())
+            self.assertIn(label, proc.stdout)
+
     def test_parser_accepts_validation_script(self):
         parser = driftguard.build_parser()
         args = parser.parse_args(["validation-script", "--shell", "powershell", "--limit", "4", "-o", "plan.ps1"])
@@ -162,6 +188,15 @@ class DriftGuardV61Tests(unittest.TestCase):
         self.assertEqual(prepared["manual_steps"], 1)
         self.assertTrue(prepared["steps"][0]["executable"])
         self.assertFalse(prepared["steps"][1]["executable"])
+
+    def test_manual_validation_does_not_report_a_pass(self):
+        plan = {"steps": [{"order": 1, "primary_node": "engine:unreal", "command": "Run engine tests manually"}]}
+        with tempfile.TemporaryDirectory() as td:
+            outcome = driftguard.execute_validation_plan(Path(td), plan)
+        self.assertEqual(outcome["executed_steps"], 0)
+        self.assertEqual(outcome["manual_steps"], 1)
+        self.assertFalse(outcome["complete"])
+        self.assertFalse(outcome["passed"])
 
     def test_execute_validation_plan_uses_direct_argv(self):
         with tempfile.TemporaryDirectory() as td:
