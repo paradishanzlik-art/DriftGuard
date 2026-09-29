@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-DriftGuard 5
-Project-aware environment drift + build-failure prediction + log intelligence.
+DriftGuard 6
+Project-aware environment drift + build-failure prediction + source-impact intelligence.
 
 Standard-library only. Python 3.9+.
 """
@@ -36,6 +36,7 @@ HISTORY_FILE = "history.jsonl"
 EVENTS_FILE = "events.jsonl"
 CONFIG_FILE = "config.json"
 INCIDENTS_FILE = "incidents.jsonl"
+VALIDATION_RUNS_FILE = "validation_runs.jsonl"
 LOG_DIR = "logs"
 
 DEFAULT_CONFIG = {
@@ -48,6 +49,11 @@ DEFAULT_CONFIG = {
     "max_native_artifacts": 120,
     "max_native_dependency_inspections": 30,
     "dependency_sample_limit": 250,
+    "source_scan_depth": 8,
+    "max_source_manifest_files": 4000,
+    "max_source_hash_bytes": 8000000,
+    "max_graph_source_components": 120,
+    "validation_plan_limit": 5,
 }
 
 TRACKED_FILES = {
@@ -149,6 +155,13 @@ LOG_SIGNATURES: Tuple[LogSignature, ...] = (
         ("python", "architecture", "path", "visual studio", "gcc", "clang"),
     ),
     LogSignature(
+        "python.syntax", "python", "Python source syntax is invalid", "high",
+        (r"SyntaxError:\s", r"IndentationError:\s", r"TabError:\s"),
+        ("A changed Python source file cannot be parsed by the active interpreter.",),
+        "Inspect the first reported file/line, correct the syntax or indentation error, then rerun the targeted test/compile validation.",
+        ("python", "source", "project"),
+    ),
+    LogSignature(
         "node.resolve", "node", "Node dependency resolution failed", "high",
         (r"npm ERR!.*ERESOLVE", r"ERR_PNPM_PEER_DEP_ISSUES", r"YN0002|YN0060"),
         ("Peer-dependency constraints are incompatible.", "The lockfile/package-manager state may have changed."),
@@ -161,6 +174,13 @@ LOG_SIGNATURES: Tuple[LogSignature, ...] = (
         ("The active Node.js version is outside a package's supported range.",),
         "Switch to the project's expected Node.js version and reinstall dependencies from the lockfile.",
         ("node", "package.json"),
+    ),
+    LogSignature(
+        "node.syntax", "node", "JavaScript source syntax is invalid", "high",
+        (r"SyntaxError:\s*(?:Unexpected|Invalid|missing|Identifier)", r"SyntaxError:\s*Unexpected end of input"),
+        ("A changed JavaScript source file cannot be parsed by the active Node.js runtime.",),
+        "Inspect the first reported source location, correct the syntax error, then rerun the targeted npm/node validation.",
+        ("node", "javascript", "source", "project"),
     ),
     LogSignature(
         "cmake.compiler", "cpp", "CMake cannot find or validate a compiler", "critical",
@@ -189,6 +209,13 @@ LOG_SIGNATURES: Tuple[LogSignature, ...] = (
         ("Objects/libraries were built with incompatible MSVC runtime or debug settings.",),
         "Rebuild all native dependencies with matching architecture, toolset, runtime library, and Debug/Release configuration.",
         ("msvc", "visual studio", "cl", "msbuild", "project"),
+    ),
+    LogSignature(
+        "cpp.compile", "cpp", "C/C++ source compilation failed", "high",
+        (r"(?m)^[^\n]+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx):\d+:\d+:\s+(?:fatal\s+)?error:",),
+        ("A changed C or C++ source file does not compile under the active compiler.",),
+        "Inspect the first compiler diagnostic at the reported source location, correct the source error, then rerun the targeted native build.",
+        ("cpp", "source", "compiler", "project"),
     ),
     LogSignature(
         "native.undefined-reference", "cpp", "Native linker has undefined references", "high",
@@ -266,6 +293,13 @@ LOG_SIGNATURES: Tuple[LogSignature, ...] = (
         ("go.mod/go.sum and the resolved module graph are out of sync.",),
         "Restore committed go.mod/go.sum or deliberately run the appropriate module tidy/download workflow and review the diff.",
         ("go", "go.mod", "go.sum"),
+    ),
+    LogSignature(
+        "go.syntax", "go", "Go source syntax is invalid", "high",
+        (r"(?m)^\.?/?[^\n]+\.go:\d+:\d+:\s+syntax error:",),
+        ("A changed Go source file cannot be parsed or compiled.",),
+        "Inspect the first reported .go file/line, correct the syntax error, then rerun go test ./....",
+        ("go", "source", "project"),
     ),
     LogSignature(
         "docker.daemon", "docker", "Docker daemon is unavailable", "high",
@@ -997,7 +1031,8 @@ def make_report(root: Path) -> dict:
     score_value = stability_score(findings)
     reqs = doctor(current)
     report = {
-        "schema": 3,        "generated_at": now_iso(),
+        "schema": 3,
+        "generated_at": now_iso(),
         "project_root": str(root.resolve()),
         "baseline_timestamp": baseline.get("timestamp"),
         "score": score_value,
@@ -1020,8 +1055,12 @@ def make_report(root: Path) -> dict:
 
 def record_outcome(root: Path, result: str, stage: str, note: str = "", command: Optional[List[str]] = None,
                    exit_code: Optional[int] = None, diagnosis: Optional[dict] = None,
-                   log_path: Optional[str] = None) -> dict:
-    report = make_report(root)
+                   log_path: Optional[str] = None, report: Optional[dict] = None) -> dict:
+    # Guard callers should reuse the preflight report so the outcome is associated
+    # with the conditions that existed before execution, while avoiding a duplicate
+    # full project scan. Direct record callers still collect a fresh report.
+    if report is None:
+        report = make_report(root)
     failure_signatures = [x.get("signature_id") for x in (diagnosis or {}).get("signatures", []) if x.get("signature_id")]
     event = {
         "timestamp": now_iso(),
@@ -1354,7 +1393,7 @@ def cmd_guard(root: Path, command: List[str], max_risk: Optional[int], force: bo
     result = "success" if rc == 0 else "failure"
     record_outcome(
         root, result, "guarded-command", f"duration={elapsed}s", command=command,
-        exit_code=rc, diagnosis=diagnosis, log_path=log_path,
+        exit_code=rc, diagnosis=diagnosis, log_path=log_path, report=report,
     )
     if log_path:
         print(f"Captured log: {log_path}")
@@ -1996,7 +2035,8 @@ def subsystem_prediction(root: Path, report: dict, requirements: List[Requiremen
     if "rust" in families: buckets["toolchain"]["validate"] = "cargo check"
     if "go" in families: buckets["dependencies"]["validate"] = "go test ./..."
     if "cpp" in families: buckets["native_abi"]["validate"] = "cmake --build build --config Debug"
-    if "unreal" in families: buckets["game_engine"]["validate"] = "Regenerate project files, then compile the Editor target for the intended EngineAssociation"    if "unity" in families: buckets["game_engine"]["validate"] = "Open once in the pinned Unity editor and run a batchmode compile/test pass"
+    if "unreal" in families: buckets["game_engine"]["validate"] = "Regenerate project files, then compile the Editor target for the intended EngineAssociation"
+    if "unity" in families: buckets["game_engine"]["validate"] = "Open once in the pinned Unity editor and run a batchmode compile/test pass"
     if "cuda" in families: buckets["graphics_gpu"]["validate"] = "nvcc --version && nvidia-smi"
     if "vulkan" in families: buckets["graphics_gpu"]["validate"] = "vulkaninfo --summary"
     if "android" in families: buckets["mobile_sdk"]["validate"] = "gradlew tasks"
@@ -2463,18 +2503,22 @@ def failure_graph_prediction(root: Path, report: dict, baseline_graph: dict) -> 
 
     sig_affinity = {
         "python.module-missing": ({"dependency", "component"}, "python"),
+        "python.syntax": ({"source-component", "component"}, "python"),
         "python.native-load": ({"native-artifact", "native-library", "tool", "component"}, "python"),
         "node.resolve": ({"dependency", "component"}, "node"),
+        "node.syntax": ({"source-component", "component"}, "node"),
         "cmake.compiler": ({"tool", "component"}, "cpp"),
         "cmake.package": ({"dependency", "sdk", "component"}, "cpp"),
         "msvc.unresolved-symbol": ({"native-artifact", "native-library", "tool", "component"}, "cpp"),
         "msvc.runtime-mismatch": ({"native-artifact", "native-library", "tool", "component"}, "cpp"),
+        "cpp.compile": ({"source-component", "component"}, "cpp"),
         "native.undefined-reference": ({"native-artifact", "native-library", "tool", "component"}, "cpp"),
         "native.architecture": ({"native-artifact", "hardware", "component"}, "cpp"),
         "cuda.driver-toolkit": ({"sdk", "hardware", "tool", "component"}, "cuda"),
         "vulkan.driver": ({"sdk", "hardware", "component"}, "vulkan"),
         "unreal.engine-version": ({"engine", "native-artifact", "component"}, "unreal"),
         "dotnet.sdk": ({"sdk", "tool", "component"}, "dotnet"),
+        "go.syntax": ({"source-component", "component"}, "go"),
         "gradle.java": ({"sdk", "tool", "component"}, "android"),
         "docker.daemon": ({"tool", "component"}, "docker"),
     }
@@ -2678,6 +2722,883 @@ def report_html(root: Path, report: dict) -> str:
     return base.replace("</body>", section + "</body>")
 
 
+# ---------------------------------------------------------------------------
+# DriftGuard v6: source-change impact intelligence.
+# ---------------------------------------------------------------------------
+
+APP_VERSION = "6.1.0"
+
+SOURCE_SUFFIX_FAMILY = {
+    ".py": "python", ".pyi": "python",
+    ".js": "node", ".jsx": "node", ".mjs": "node", ".cjs": "node",
+    ".ts": "node", ".tsx": "node",
+    ".c": "cpp", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
+    ".h": "cpp", ".hh": "cpp", ".hpp": "cpp", ".hxx": "cpp",
+    ".rs": "rust", ".go": "go", ".cs": "dotnet",
+    ".java": "android", ".kt": "android", ".kts": "android",
+    ".cu": "cuda", ".cuh": "cuda",
+    ".vert": "vulkan", ".frag": "vulkan", ".glsl": "vulkan", ".comp": "vulkan",
+    ".hlsl": "vulkan", ".fx": "vulkan",
+}
+
+_SOURCE_GRAPH_KINDS = {"source-component"}
+
+
+def _source_family_for_path(rel: str, families: Sequence[str]) -> Optional[str]:
+    low = rel.replace("\\", "/").lower()
+    suffix = Path(low).suffix.lower()
+    fam = SOURCE_SUFFIX_FAMILY.get(suffix)
+    if "unreal" in families and (low.endswith(".build.cs") or low.endswith(".target.cs") or low.startswith("source/") or "/source/" in low):
+        if suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".cs"}:
+            return "unreal"
+    if "unity" in families and low.startswith("assets/") and suffix == ".cs":
+        return "unity"
+    return fam
+
+
+def _source_bucket(rel: str) -> str:
+    parts = Path(rel.replace("\\", "/")).parts
+    if len(parts) <= 1:
+        return "."
+    return str(parts[0]).replace("\\", "/")
+
+
+def _read_small_text(path: Path, limit: int = 200000) -> str:
+    try:
+        if path.stat().st_size > limit:
+            return ""
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def _source_validation(root: Path, family: str, bucket: str, sample_paths: Sequence[str]) -> str:
+    if family == "python":
+        pyproject = _read_small_text(root / "pyproject.toml").lower()
+        has_pytest = any((root / name).exists() for name in ("pytest.ini", "conftest.py")) or "pytest" in pyproject
+        if (root / "tests").is_dir():
+            if has_pytest:
+                return f'"{sys.executable}" -m pytest -q'
+            return f'"{sys.executable}" -m unittest discover -s tests -v'
+        target = bucket if bucket != "." else "."
+        return f'"{sys.executable}" -m compileall -q -f "{target}"'
+    if family == "node":
+        try:
+            pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        except Exception:
+            pkg = {}
+        scripts = pkg.get("scripts", {}) if isinstance(pkg, dict) else {}
+        test_script = str(scripts.get("test", ""))
+        if test_script and "no test specified" not in test_script.lower():
+            return "npm test"
+        if scripts.get("build"):
+            return "npm run build"
+        sample = next((p for p in sample_paths if Path(p).suffix.lower() in {".js", ".mjs", ".cjs"}), None)
+        return f'node --check "{sample}"' if sample else "npm ls --depth=0"
+    if family == "rust": return "cargo test"
+    if family == "go": return "go test ./..."
+    if family == "dotnet": return "dotnet test"
+    if family == "android": return "gradlew test (gradlew.bat test on Windows; ./gradlew test on macOS/Linux)"
+    if family in {"cpp", "cuda", "vulkan"}:
+        if (root / "CMakeLists.txt").exists(): return "cmake --build build --config Debug"
+        return "Run the project's native debug build and targeted tests for the changed source area"
+    if family == "unreal": return "Compile the affected Unreal Editor target/module for the pinned engine, then run relevant automation tests"
+    if family == "unity": return "Run a Unity batchmode compile/test pass for the affected assembly or scene tests"
+    return "Run the narrowest project test/build covering the changed source area"
+
+
+def scan_source_manifest(root: Path, max_depth: int = 8, max_files: int = 4000, max_hash_bytes: int = 8000000) -> dict:
+    """Create a bounded deterministic source manifest and aggregate logical source components."""
+    families = infer_project(
+        root,
+        discover_project_files(root, max_depth),
+        scan_source_shape(root, max_depth, max_files),
+    ).get("families", [])
+    files: Dict[str, dict] = {}
+    component_members: Dict[str, List[Tuple[str, str, int]]] = {}
+    truncated = False
+    seen = 0
+    for base, dirs, names in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in IGNORE_DIRS)
+        names = sorted(names)
+        base_path = Path(base)
+        try:
+            depth = len(base_path.relative_to(root).parts)
+        except ValueError:
+            depth = 0
+        if depth > max_depth:
+            dirs[:] = []
+            continue
+        for name in names:
+            rel_path = (base_path / name).relative_to(root)
+            rel = str(rel_path).replace("\\", "/")
+            family = _source_family_for_path(rel, families)
+            if not family:
+                continue
+            seen += 1
+            if seen > max_files:
+                truncated = True
+                break
+            p = root / rel_path
+            try:
+                size = p.stat().st_size
+                digest = sha256_file(p) if size <= max_hash_bytes else hashlib.sha256(f"oversize:{size}".encode()).hexdigest()
+            except OSError:
+                continue
+            bucket = _source_bucket(rel)
+            rec = {"sha256": digest, "size": size, "family": family, "bucket": bucket}
+            files[rel] = rec
+            key = f"{family}/{bucket}"
+            component_members.setdefault(key, []).append((rel, digest, size))
+        if truncated:
+            break
+
+    components: Dict[str, dict] = {}
+    for key, members in sorted(component_members.items()):
+        family, bucket = key.split("/", 1)
+        canonical = "\n".join(f"{p}|{d}|{s}" for p, d, s in sorted(members))
+        samples = [p for p, _d, _s in sorted(members)[:8]]
+        components[key] = {
+            "family": family,
+            "bucket": bucket,
+            "file_count": len(members),
+            "fingerprint": hashlib.sha256(canonical.encode()).hexdigest(),
+            "sample_paths": samples,
+            "validation": _source_validation(root, family, bucket, samples),
+        }
+    manifest_fp = hashlib.sha256("\n".join(
+        f"{p}|{rec['sha256']}|{rec['size']}" for p, rec in sorted(files.items())
+    ).encode()).hexdigest()
+    return {
+        "schema": 1,
+        "fingerprint": manifest_fp,
+        "file_count": len(files),
+        "files": files,
+        "components": components,
+        "truncated": truncated,
+        "limit": max_files,
+    }
+
+
+def source_change_delta(baseline: dict, current: dict) -> dict:
+    bman = baseline.get("source_manifest") or {}
+    cman = current.get("source_manifest") or {}
+    if "files" not in bman:
+        return {
+            "baseline_available": False,
+            "requires_rebaseline": True,
+            "added": [], "removed": [], "changed": [], "changed_components": [],
+            "total_changes": 0,
+            "note": "The existing baseline predates source-impact tracking. Validate the current project, then run driftguard init --force to enable source-change comparison.",
+        }
+    bf = bman.get("files", {}) or {}
+    cf = cman.get("files", {}) or {}
+    added = sorted(set(cf) - set(bf))
+    removed = sorted(set(bf) - set(cf))
+    changed = sorted(p for p in set(bf) & set(cf) if bf[p].get("sha256") != cf[p].get("sha256"))
+    affected = added + removed + changed
+    components = set()
+    for path in affected:
+        rec = cf.get(path) or bf.get(path) or {}
+        family = rec.get("family")
+        bucket = rec.get("bucket")
+        if family and bucket is not None:
+            components.add(f"{family}/{bucket}")
+    return {
+        "baseline_available": True,
+        "requires_rebaseline": False,
+        "added": added, "removed": removed, "changed": changed,
+        "changed_components": sorted(components),
+        "total_changes": len(affected),
+        "truncated": bool(bman.get("truncated") or cman.get("truncated")),
+    }
+
+
+def _recompute_graph_fingerprint(graph: dict) -> dict:
+    nodes = list(graph.get("nodes", []))
+    edges = list(graph.get("edges", []))
+    canonical_nodes = [f"{n['id']}|{_fingerprint(n.get('state'))}" for n in sorted(nodes, key=lambda x: x["id"])]
+    canonical_edges = [f"{e['src']}|{e['relation']}|{e['dst']}" for e in sorted(edges, key=lambda x: (x['src'], x['relation'], x['dst']))]
+    graph["fingerprint"] = hashlib.sha256("\n".join(canonical_nodes + canonical_edges).encode()).hexdigest()
+    graph["node_count"] = len(nodes)
+    graph["edge_count"] = len(edges)
+    return graph
+
+
+_build_failure_graph_v5 = build_failure_graph
+
+
+def build_failure_graph(snapshot: dict) -> dict:
+    graph = _build_failure_graph_v5(snapshot)
+    nodes = {n["id"]: n for n in graph.get("nodes", [])}
+    edges = list(graph.get("edges", []))
+    seen = {(e["src"], e["dst"], e["relation"]) for e in edges}
+    families = set((snapshot.get("project", {}) or {}).get("families", []) or [])
+    source = snapshot.get("source_manifest", {}) or {}
+    max_nodes = int(DEFAULT_CONFIG.get("max_graph_source_components", 120))
+    for key, rec in list(sorted((source.get("components", {}) or {}).items()))[:max_nodes]:
+        family = str(rec.get("family") or "source")
+        bucket = str(rec.get("bucket") or ".")
+        sid = _add_graph_node(
+            nodes, "source-component", key, f"{family} source · {bucket}",
+            state=rec.get("fingerprint"),
+            metadata={
+                "ecosystem": family, "family": family, "bucket": bucket,
+                "file_count": rec.get("file_count", 0),
+                "sample_paths": rec.get("sample_paths", []),
+                "validation": rec.get("validation"),
+            },
+        )
+        parent = _node_id("component", family) if family in families and _node_id("component", family) in nodes else "project:root"
+        _add_graph_edge(edges, seen, parent, sid, "contains-source")
+    graph["nodes"] = list(sorted(nodes.values(), key=lambda x: x["id"]))
+    graph["edges"] = sorted(edges, key=lambda x: (x["src"], x["relation"], x["dst"]))
+    graph["schema"] = 2
+    graph["truncated"] = bool(graph.get("truncated") or len((source.get("components") or {})) > max_nodes)
+    return _recompute_graph_fingerprint(graph)
+
+
+def collect_snapshot_v6_base(root: Path) -> dict:
+    """Collect the v5 snapshot without triggering the v6 override."""
+    return _collect_snapshot_v4(root)
+
+
+def collect_snapshot(root: Path) -> dict:
+    """v6 snapshot adds bounded source fingerprints before building the failure graph."""
+    cfg = get_config(root)
+    snap = collect_snapshot_v6_base(root)
+    snap["schema"] = 6
+    snap["app_version"] = APP_VERSION
+    snap["source_manifest"] = scan_source_manifest(
+        root,
+        int(cfg.get("source_scan_depth", max(8, int(cfg.get("max_scan_depth", 5))))),
+        int(cfg.get("max_source_manifest_files", 4000)),
+        int(cfg.get("max_source_hash_bytes", 8000000)),
+    )
+    snap["failure_graph"] = build_failure_graph(snap)
+    return snap
+
+
+def _neutralize_missing_source_baseline(baseline_graph: dict, current_graph: dict) -> dict:
+    """Avoid upgrade noise when a v5 baseline has no source manifest."""
+    clone = json.loads(json.dumps(baseline_graph or {}))
+    nodes = {n["id"]: n for n in clone.get("nodes", [])}
+    edges = list(clone.get("edges", []))
+    seen = {(e["src"], e["dst"], e["relation"]) for e in edges}
+    source_ids = set()
+    for n in current_graph.get("nodes", []):
+        if n.get("kind") in _SOURCE_GRAPH_KINDS:
+            nodes[n["id"]] = n
+            source_ids.add(n["id"])
+    for e in current_graph.get("edges", []):
+        if e.get("src") in source_ids or e.get("dst") in source_ids:
+            key = (e["src"], e["dst"], e["relation"])
+            if key not in seen and e.get("src") in nodes and e.get("dst") in nodes:
+                edges.append(e); seen.add(key)
+    clone["nodes"] = list(sorted(nodes.values(), key=lambda x: x["id"]))
+    clone["edges"] = sorted(edges, key=lambda x: (x["src"], x["relation"], x["dst"]))
+    clone["schema"] = max(int(clone.get("schema", 1)), 2)
+    return _recompute_graph_fingerprint(clone)
+
+
+_node_validation_v5 = _node_validation
+
+
+def _node_validation(node: dict, families: Sequence[str]) -> str:
+    if node.get("kind") == "source-component":
+        meta = node.get("metadata", {}) or {}
+        if meta.get("validation"):
+            return str(meta["validation"])
+    return _node_validation_v5(node, families)
+
+
+def make_report(root: Path) -> dict:
+    baseline_path = state_path(root, BASELINE_FILE)
+    if not baseline_path.exists(): raise FileNotFoundError("No baseline. Run: driftguard init")
+    baseline = load_json(baseline_path)
+    current = collect_snapshot(root)
+    findings = compare(baseline, current)
+    score_value = stability_score(findings)
+    reqs = doctor(current)
+    impact = source_change_delta(baseline, current)
+    report = {
+        "schema": 6, "generated_at": now_iso(), "project_root": str(root.resolve()),
+        "baseline_timestamp": baseline.get("timestamp"), "score": score_value,
+        "status": stability_status(score_value, findings),
+        "counts": {s: sum(f.severity == s for f in findings) for s in SEVERITY_ORDER},
+        "findings": [asdict(f) for f in findings], "requirements": [asdict(r) for r in reqs],
+        "current": current, "source_impact": impact,
+        "recent_incidents": load_recent_incidents(root, int(get_config(root).get("incident_history_limit", 100)))[-8:],
+    }
+    report["prediction"] = predict_risk(root, report, reqs)
+    baseline_graph = baseline.get("failure_graph") or build_failure_graph(baseline)
+    if "files" not in (baseline.get("source_manifest") or {}):
+        baseline_graph = _neutralize_missing_source_baseline(baseline_graph, current.get("failure_graph", {}))
+    report["failure_graph_prediction"] = failure_graph_prediction(root, report, baseline_graph)
+    report["validation_plan"] = build_validation_plan(report, int(get_config(root).get("validation_plan_limit", 5)))
+    top = (report["failure_graph_prediction"].get("top_node") or {}).get("risk", 0)
+    if top:
+        lifted = max(report["prediction"].get("risk", 0), min(96, int(report["prediction"].get("risk", 0) * 0.72 + top * 0.40)))
+        report["prediction"]["risk"] = lifted
+        report["prediction"]["label"] = "LOW" if lifted < 25 else "GUARDED" if lifted < 50 else "ELEVATED" if lifted < 75 else "HIGH"
+        report["prediction"]["graph_top_node"] = report["failure_graph_prediction"].get("top_node")
+    if impact.get("baseline_available") and impact.get("total_changes"):
+        report["prediction"].setdefault("drivers", []).append({
+            "type": "source-impact", "severity": "medium", "item": f"{impact['total_changes']} source file change(s)",
+            "detail": "Changed source components are connected to targeted validation recommendations; source edits are not treated as environment drift by themselves.",
+        })
+    ensure_state(root); write_json(state_path(root, LAST_REPORT_FILE), report)
+    append_jsonl(state_path(root, HISTORY_FILE), {
+        "timestamp": report["generated_at"], "score": report["score"], "status": report["status"],
+        "risk": report["prediction"]["risk"], "risk_label": report["prediction"]["label"],
+        "counts": report["counts"], "graph_top": (report["failure_graph_prediction"].get("top_node") or {}).get("node_id"),
+        "source_changes": impact.get("total_changes", 0),
+    })
+    return report
+
+
+def cmd_impact(root: Path, json_output: bool) -> int:
+    try: report = make_report(root)
+    except FileNotFoundError as e: print(str(e), file=sys.stderr); return 2
+    impact = report.get("source_impact", {})
+    if json_output:
+        print(json.dumps(impact, indent=2)); return 0
+    if not impact.get("baseline_available"):
+        print(impact.get("note") or "Source-impact baseline is not available.")
+        return 0
+    print(f"Source changes: {impact.get('total_changes',0)}")
+    print(f"  modified: {len(impact.get('changed',[]))}  added: {len(impact.get('added',[]))}  removed: {len(impact.get('removed',[]))}")
+    if impact.get("changed_components"):
+        print("Affected components: " + ", ".join(impact["changed_components"]))
+    display = {"changed": "modified", "added": "added", "removed": "removed"}
+    for label in ("changed", "added", "removed"):
+        for path in impact.get(label, [])[:20]:
+            print(f"  {display[label]}: {path}")
+    nxt = report.get("failure_graph_prediction", {}).get("next_validation")
+    if nxt:
+        print(f"Next validation: {nxt.get('command')}")
+    return 0
+
+
+def cmd_validate_next(root: Path, json_output: bool) -> int:
+    try: report = make_report(root)
+    except FileNotFoundError as e: print(str(e), file=sys.stderr); return 2
+    nxt = report.get("failure_graph_prediction", {}).get("next_validation")
+    impact = report.get("source_impact", {})
+    payload = dict(nxt or {})
+    if payload and payload.get("node_id", "").startswith("source-component:"):
+        payload["source_changes"] = {
+            "changed": impact.get("changed", [])[:20], "added": impact.get("added", [])[:20], "removed": impact.get("removed", [])[:20]
+        }
+    if json_output: print(json.dumps(payload, indent=2)); return 0
+    if not nxt:
+        if not impact.get("baseline_available") and impact.get("requires_rebaseline"):
+            print(impact.get("note"))
+        else:
+            print("No elevated graph node requires targeted validation. Run the normal project test/build suite.")
+        return 0
+    print(f"Node   : {nxt['node_id']}")
+    print(f"Reason : {nxt['reason']}")
+    if nxt.get("node_id", "").startswith("source-component:") and impact.get("total_changes"):
+        changed = (impact.get("changed", []) + impact.get("added", []) + impact.get("removed", []))[:8]
+        if changed:
+            print("Changed: " + ", ".join(changed))
+    print(f"Validate: {nxt['command']}")
+    return 0
+
+
+def build_validation_plan(report: dict, limit: int = 5) -> dict:
+    """Return a bounded, deduplicated sequence of targeted validations.
+
+    The failure graph can rank many risky nodes that collapse to the same practical
+    validation command. A plan groups those nodes so engineers get broad coverage
+    without repeatedly running equivalent checks.
+    """
+    bounded_limit = max(1, min(int(limit), 20))
+    prediction = report.get("failure_graph_prediction", {}) or {}
+    ranked = list(prediction.get("ranked_nodes", []) or [])
+    grouped: Dict[str, dict] = {}
+
+    for row in ranked:
+        command = str(row.get("validation") or "").strip()
+        if not command:
+            continue
+        key = re.sub(r"\s+", " ", command).strip()
+        if not key:
+            continue
+        entry = grouped.get(key)
+        node = {
+            "node_id": row.get("node_id"),
+            "kind": row.get("kind"),
+            "label": row.get("label"),
+            "risk": int(row.get("risk", 0) or 0),
+            "risk_label": row.get("risk_label"),
+            "direct": bool(row.get("direct")),
+            "blast_radius": int(row.get("blast_radius", 0) or 0),
+        }
+        if entry is None:
+            grouped[key] = {
+                "command": command,
+                "risk": node["risk"],
+                "risk_label": row.get("risk_label"),
+                "primary_node": row.get("node_id"),
+                "primary_reason": (row.get("reasons") or ["highest graph risk"])[0],
+                "direct": bool(row.get("direct")),
+                "blast_radius": node["blast_radius"],
+                "nodes": [node],
+            }
+        else:
+            entry["nodes"].append(node)
+            entry["direct"] = bool(entry.get("direct") or row.get("direct"))
+            entry["blast_radius"] = max(int(entry.get("blast_radius", 0)), node["blast_radius"])
+            if node["risk"] > int(entry.get("risk", 0)):
+                entry["risk"] = node["risk"]
+                entry["risk_label"] = row.get("risk_label")
+                entry["primary_node"] = row.get("node_id")
+                entry["primary_reason"] = (row.get("reasons") or ["highest graph risk"])[0]
+
+    steps = list(grouped.values())
+    steps.sort(key=lambda x: (
+        -int(x.get("risk", 0)),
+        -int(bool(x.get("direct"))),
+        -int(x.get("blast_radius", 0)),
+        str(x.get("command", "")),
+    ))
+    steps = steps[:bounded_limit]
+    for index, step in enumerate(steps, 1):
+        step["order"] = index
+        step["covered_nodes"] = len(step.get("nodes", []))
+
+    risky_with_validation = sum(1 for row in ranked if str(row.get("validation") or "").strip())
+    covered_node_ids = {
+        node.get("node_id")
+        for step in steps
+        for node in step.get("nodes", [])
+        if node.get("node_id")
+    }
+    impact = report.get("source_impact", {}) or {}
+    return {
+        "schema": 1,
+        "limit": bounded_limit,
+        "step_count": len(steps),
+        "steps": steps,
+        "coverage": {
+            "risky_nodes_with_validation": risky_with_validation,
+            "covered_risky_nodes": len(covered_node_ids),
+        },
+        "source_changes": {
+            "total": int(impact.get("total_changes", 0) or 0),
+            "components": list(impact.get("changed_components", []) or [])[:40],
+        },
+        "fallback": None if steps else "Run the normal project test/build suite.",
+    }
+
+
+def cmd_validate_plan(root: Path, limit: int, json_output: bool) -> int:
+    try:
+        report = make_report(root)
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    plan = build_validation_plan(report, limit)
+    if json_output:
+        print(json.dumps(plan, indent=2))
+        return 0
+    if not plan.get("steps"):
+        print(plan.get("fallback") or "No targeted validation plan is required.")
+        return 0
+    print(f"Validation plan: {plan['step_count']} step(s)")
+    source = plan.get("source_changes", {})
+    if source.get("total"):
+        print(f"Source changes: {source['total']} across {len(source.get('components', []))} component(s)")
+    for step in plan["steps"]:
+        print(f"{step['order']}. [{step.get('risk_label') or 'RISK'} {step.get('risk', 0)}/100] {step['command']}")
+        print(f"   Covers {step.get('covered_nodes', 0)} risky node(s); primary: {step.get('primary_node')}")
+        if step.get("primary_reason"):
+            print(f"   Reason: {step['primary_reason']}")
+    return 1 if any(int(step.get("risk", 0)) >= 75 for step in plan["steps"]) else 0
+
+
+_SAFE_FIXED_VALIDATIONS = {
+    "npm test", "npm run build", "npm ls --depth=0",
+    "cargo test", "cargo check", "go test ./...",
+    "dotnet test", "dotnet --info",
+    "cmake --build build --config Debug",
+    "nvcc --version", "vulkaninfo --summary", "adb version",
+    "cl", "msbuild -version", "docker --version", "git --version",
+}
+
+
+def _safe_validation_path(value: str) -> bool:
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/\\ -")
+    if not value or any(ch not in allowed for ch in value):
+        return False
+    normalized = value.replace("\\", "/")
+    if normalized == ".":
+        return True
+    # These paths are generated from a project scan. Do not let an exported
+    # script or explicit validation run walk outside that project or interpret
+    # a filename as another command-line option.
+    return (
+        not normalized.startswith(("/", "-"))
+        and all(part not in {"", ".", ".."} for part in normalized.split("/"))
+    )
+
+
+def _portable_validation_command(command: str, shell: str) -> Optional[str]:
+    """Return a conservative portable command or None for a manual validation."""
+    command = " ".join(str(command or "").split())
+    if not command or any(ch in command for ch in ("\n", "\r", chr(96), "$", ";", "|", "&", ">", "<")):
+        return None
+    if command in _SAFE_FIXED_VALIDATIONS:
+        return command
+
+    if " -m " in command:
+        _python, tail = command.split(" -m ", 1)
+        if tail in {"pytest -q", "unittest discover -s tests -v", "pip check"}:
+            return f'& $Python -m {tail}' if shell == "powershell" else f'"$PYTHON_BIN" -m {tail}'
+        prefix = 'compileall -q -f "'
+        if tail.startswith(prefix) and tail.endswith('"'):
+            target = tail[len(prefix):-1]
+            if not _safe_validation_path(target):
+                return None
+            if shell == "powershell":
+                return f"& $Python -m compileall -q -f '{target}'"
+            return f'"$PYTHON_BIN" -m compileall -q -f \'{target}\''
+
+    node_prefix = 'node --check "'
+    if command.startswith(node_prefix) and command.endswith('"'):
+        target = command[len(node_prefix):-1]
+        if not _safe_validation_path(target):
+            return None
+        return f"node --check '{target}'"
+
+    return None
+
+
+def render_validation_script(plan: dict, shell: str) -> str:
+    shell = str(shell or "").lower()
+    if shell not in {"bash", "powershell"}:
+        raise ValueError("shell must be bash or powershell")
+    steps = list(plan.get("steps", []) or [])
+
+    if shell == "bash":
+        lines = [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            'PYTHON_BIN="' + "$" + '{PYTHON:-python3}"',
+            "",
+            "# Generated by DriftGuard. Review before execution.",
+        ]
+        for step in steps:
+            command = str(step.get("command") or "")
+            portable = _portable_validation_command(command, shell)
+            label = " ".join(f"{step.get('order', '?')}. {step.get('primary_node') or 'validation'}".split())
+            lines.extend(["", f"echo {shlex.quote('==> ' + label)}"])
+            if portable:
+                lines.append(portable)
+            else:
+                safe = command.replace("\n", " ").replace("\r", " ")
+                lines.append(f"# MANUAL: {safe}")
+        if not steps:
+            lines.extend(["", "# No targeted validation steps. Run the normal project test/build suite."])
+        return "\n".join(lines) + "\n"
+
+    lines = [
+        '$ErrorActionPreference = "Stop"',
+        '$Python = if ($env:PYTHON) { $env:PYTHON } else { "python" }',
+        "",
+        "# Generated by DriftGuard. Review before execution.",
+    ]
+    for step in steps:
+        command = str(step.get("command") or "")
+        portable = _portable_validation_command(command, shell)
+        label = " ".join(f"{step.get('order', '?')}. {step.get('primary_node') or 'validation'}".split())
+        label_ps = label.replace("'", "''")
+        lines.extend(["", f"Write-Host '==> {label_ps}'"])
+        if portable:
+            lines.append(portable)
+            lines.append("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }")
+        else:
+            safe = command.replace("\n", " ").replace("\r", " ")
+            lines.append(f"# MANUAL: {safe}")
+    if not steps:
+        lines.extend(["", "# No targeted validation steps. Run the normal project test/build suite."])
+    return "\n".join(lines) + "\n"
+
+
+def cmd_validation_script(root: Path, shell: str, output: Optional[Path], limit: int) -> int:
+    try:
+        report = make_report(root)
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    plan = build_validation_plan(report, limit)
+    script = render_validation_script(plan, shell)
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        # Path.write_text(newline=...) requires Python 3.10; our package
+        # supports 3.9, where Path.open already accepts newline.
+        with output.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(script)
+        print(f"Wrote {shell} validation script: {output.resolve()}")
+    else:
+        print(script, end="")
+    return 0
+
+
+def _validation_argv(command: str) -> Optional[List[str]]:
+    """Translate only DriftGuard's known generated validations to direct argv."""
+    command = " ".join(str(command or "").split())
+    if not command or any(ch in command for ch in ("\n", "\r", chr(96), "$", ";", "|", "&", ">", "<")):
+        return None
+
+    fixed = {
+        "npm test": ["npm", "test"],
+        "npm run build": ["npm", "run", "build"],
+        "npm ls --depth=0": ["npm", "ls", "--depth=0"],
+        "cargo test": ["cargo", "test"],
+        "cargo check": ["cargo", "check"],
+        "go test ./...": ["go", "test", "./..."],
+        "dotnet test": ["dotnet", "test"],
+        "dotnet --info": ["dotnet", "--info"],
+        "cmake --build build --config Debug": ["cmake", "--build", "build", "--config", "Debug"],
+        "nvcc --version": ["nvcc", "--version"],
+        "vulkaninfo --summary": ["vulkaninfo", "--summary"],
+        "adb version": ["adb", "version"],
+        "cl": ["cl"],
+        "msbuild -version": ["msbuild", "-version"],
+        "docker --version": ["docker", "--version"],
+        "git --version": ["git", "--version"],
+    }
+    if command in fixed:
+        return fixed[command]
+
+    if " -m " in command:
+        _python, tail = command.split(" -m ", 1)
+        if tail == "pytest -q":
+            return [sys.executable, "-m", "pytest", "-q"]
+        if tail == "unittest discover -s tests -v":
+            return [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"]
+        if tail == "pip check":
+            return [sys.executable, "-m", "pip", "check"]
+        prefix = 'compileall -q -f "'
+        if tail.startswith(prefix) and tail.endswith('"'):
+            target = tail[len(prefix):-1]
+            if _safe_validation_path(target):
+                return [sys.executable, "-m", "compileall", "-q", "-f", target]
+            return None
+
+    node_prefix = 'node --check "'
+    if command.startswith(node_prefix) and command.endswith('"'):
+        target = command[len(node_prefix):-1]
+        if _safe_validation_path(target):
+            return ["node", "--check", target]
+    return None
+
+
+def prepare_validation_execution(plan: dict) -> dict:
+    prepared = []
+    for step in list(plan.get("steps", []) or []):
+        argv = _validation_argv(str(step.get("command") or ""))
+        prepared.append({
+            "order": step.get("order"),
+            "node_id": step.get("primary_node"),
+            "risk": int(step.get("risk", 0) or 0),
+            "risk_label": step.get("risk_label"),
+            "command": step.get("command"),
+            "executable": argv is not None,
+            "argv": argv,
+        })
+    return {
+        "schema": 1,
+        "generated_at": now_iso(),
+        "step_count": len(prepared),
+        "executable_steps": sum(1 for step in prepared if step["executable"]),
+        "manual_steps": sum(1 for step in prepared if not step["executable"]),
+        "steps": prepared,
+    }
+
+
+def execute_validation_plan(root: Path, plan: dict, timeout_seconds: int = 900,
+                            continue_on_failure: bool = False) -> dict:
+    timeout_seconds = max(1, min(int(timeout_seconds), 86400))
+    prepared = prepare_validation_execution(plan)
+    results = []
+    stopped_early = False
+
+    for step in prepared["steps"]:
+        argv = step.get("argv")
+        base = {
+            "order": step.get("order"),
+            "node_id": step.get("node_id"),
+            "risk": step.get("risk"),
+            "risk_label": step.get("risk_label"),
+            "command": step.get("command"),
+            "argv": argv,
+        }
+        if not argv:
+            results.append({**base, "status": "manual", "exit_code": None, "duration_seconds": 0.0})
+            continue
+
+        started = time.perf_counter()
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(root), text=True, capture_output=True,
+                timeout=timeout_seconds,
+            )
+            duration = round(time.perf_counter() - started, 3)
+            status = "passed" if proc.returncode == 0 else "failed"
+            result = {
+                **base,
+                "status": status,
+                "exit_code": proc.returncode,
+                "duration_seconds": duration,
+                "stdout_tail": (proc.stdout or "")[-6000:],
+                "stderr_tail": (proc.stderr or "")[-6000:],
+            }
+        except FileNotFoundError as e:
+            result = {
+                **base,
+                "status": "tool-missing",
+                "exit_code": 127,
+                "duration_seconds": round(time.perf_counter() - started, 3),
+                "stdout_tail": "",
+                "stderr_tail": str(e),
+            }
+        except subprocess.TimeoutExpired as e:
+            result = {
+                **base,
+                "status": "timeout",
+                "exit_code": 124,
+                "duration_seconds": round(time.perf_counter() - started, 3),
+                "stdout_tail": str(e.stdout or "")[-6000:],
+                "stderr_tail": str(e.stderr or "")[-6000:],
+            }
+        results.append(result)
+        if result["status"] != "passed" and not continue_on_failure:
+            stopped_early = True
+            break
+
+    executed = [r for r in results if r.get("status") != "manual"]
+    failed = [r for r in executed if r.get("status") != "passed"]
+    manual = [r for r in results if r.get("status") == "manual"]
+    complete = not manual and not stopped_early and len(results) == prepared["step_count"]
+    return {
+        "schema": 1,
+        "generated_at": now_iso(),
+        "project_root": str(root.resolve()),
+        "timeout_seconds": timeout_seconds,
+        "continue_on_failure": bool(continue_on_failure),
+        "stopped_early": stopped_early,
+        "planned_steps": prepared["step_count"],
+        "executed_steps": len(executed),
+        "manual_steps": len(manual),
+        "failed_steps": len(failed),
+        "complete": complete,
+        "passed": not failed and complete,
+        "results": results,
+    }
+
+
+def cmd_validate_run(root: Path, limit: int, timeout_seconds: int, continue_on_failure: bool,
+                     execute: bool, json_output: bool, save: bool) -> int:
+    try:
+        report = make_report(root)
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    plan = build_validation_plan(report, limit)
+    if not execute:
+        payload = prepare_validation_execution(plan)
+        payload["execution_requested"] = False
+        if json_output:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"Validation run dry-run: {payload['executable_steps']} executable, {payload['manual_steps']} manual")
+            for step in payload["steps"]:
+                mode = "EXEC" if step["executable"] else "MANUAL"
+                print(f"{step.get('order')}. [{mode}] {step.get('command')}")
+            print("Nothing executed. Re-run with --execute to run allowlisted steps directly without a shell.")
+        if save:
+            ensure_state(root)
+            append_jsonl(state_path(root, VALIDATION_RUNS_FILE), payload)
+        return 0
+
+    payload = execute_validation_plan(root, plan, timeout_seconds, continue_on_failure)
+    payload["execution_requested"] = True
+    if save:
+        ensure_state(root)
+        append_jsonl(state_path(root, VALIDATION_RUNS_FILE), payload)
+    if json_output:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Validation run: {payload['executed_steps']} executed, {payload['manual_steps']} manual, {payload['failed_steps']} failed")
+        for result in payload["results"]:
+            status = str(result.get("status") or "").upper()
+            print(f"{result.get('order')}. [{status}] {result.get('command')}")
+            if result.get("exit_code") is not None:
+                print(f"   exit={result.get('exit_code')} duration={result.get('duration_seconds')}s")
+        if payload["manual_steps"]:
+            print("Manual steps remain; use validation-script to export the full reviewable plan.")
+    if payload["failed_steps"]:
+        return 1
+    return 0 if payload["complete"] else 4
+
+
+_report_html_v5 = report_html
+
+
+def report_html(root: Path, report: dict) -> str:
+    base = _report_html_v5(root, report)
+    impact = report.get("source_impact", {}) or {}
+    if not impact.get("baseline_available"):
+        detail = html.escape(impact.get("note") or "Source-impact baseline not available.")
+        section = f"<section style='margin-top:24px'><h2>Source impact</h2><div class='panel muted'>{detail}</div></section>"
+        return base.replace("</body>", section + "</body>")
+    paths = []
+    for kind in ("changed", "added", "removed"):
+        for path in impact.get(kind, [])[:12]:
+            paths.append(f"<tr><td>{html.escape(kind)}</td><td><code>{html.escape(path)}</code></td></tr>")
+    section = f"""
+<section style='margin-top:24px'>
+<h2>Source impact</h2>
+<div class='cards'>
+  <div class='card'>Source changes<b>{impact.get('total_changes',0)}</b></div>
+  <div class='card'>Changed components<b>{len(impact.get('changed_components',[]))}</b></div>
+  <div class='card'>Manifest bounded<b>{'yes' if impact.get('truncated') else 'no'}</b></div>
+</div>
+<table><thead><tr><th>Change</th><th>Path</th></tr></thead><tbody>{''.join(paths) if paths else '<tr><td colspan="2" class="ok">No source changes since baseline.</td></tr>'}</tbody></table>
+</section>
+"""
+    plan = report.get("validation_plan") or build_validation_plan(report, int(get_config(root).get("validation_plan_limit", 5)))
+    plan_rows = []
+    for step in plan.get("steps", []):
+        plan_rows.append(
+            "<tr>"
+            f"<td>{step.get('order')}</td>"
+            f"<td>{html.escape(str(step.get('risk_label') or ''))} {int(step.get('risk', 0))}/100</td>"
+            f"<td><code>{html.escape(str(step.get('command') or ''))}</code></td>"
+            f"<td>{int(step.get('covered_nodes', 0))}</td>"
+            f"<td>{html.escape(str(step.get('primary_node') or ''))}</td>"
+            "</tr>"
+        )
+    plan_section = f"""
+<section style='margin-top:24px'>
+<h2>Validation plan</h2>
+<div class='cards'>
+  <div class='card'>Targeted steps<b>{plan.get('step_count',0)}</b></div>
+  <div class='card'>Risk nodes covered<b>{(plan.get('coverage') or {}).get('covered_risky_nodes',0)}</b></div>
+  <div class='card'>Risk nodes available<b>{(plan.get('coverage') or {}).get('risky_nodes_with_validation',0)}</b></div>
+</div>
+<table><thead><tr><th>#</th><th>Risk</th><th>Validation</th><th>Nodes</th><th>Primary node</th></tr></thead>
+<tbody>{''.join(plan_rows) if plan_rows else '<tr><td colspan="5" class="ok">No targeted validation required; run the normal project suite.</td></tr>'}</tbody></table>
+</section>
+"""
+    return base.replace("</body>", section + plan_section + "</body>")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="driftguard", description="Predictive environment drift, structural failure graphs, and build-failure diagnosis.")
     p.add_argument("--root", default=".", help="Project root (default: current directory)")
@@ -2702,6 +3623,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("explain", help="Explain one graph node, its risk evidence, and blast radius")
     s.add_argument("node"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("validate-next", help="Show the highest-value validation to run next"); s.add_argument("--json", action="store_true")
+    s = sub.add_parser("validate-plan", help="Build a deduplicated, risk-prioritized validation sequence"); s.add_argument("--limit", type=int, default=5); s.add_argument("--json", action="store_true")
+    s = sub.add_parser("validation-script", help="Export the targeted validation plan as a reviewable shell script"); s.add_argument("--shell", choices=["bash","powershell"], required=True); s.add_argument("--limit", type=int, default=5); s.add_argument("-o", "--output")
+    s = sub.add_parser("validate-run", help="Dry-run or explicitly execute allowlisted validation-plan steps"); s.add_argument("--limit", type=int, default=5); s.add_argument("--timeout", type=int, default=900); s.add_argument("--continue-on-failure", action="store_true"); s.add_argument("--execute", action="store_true"); s.add_argument("--json", action="store_true"); s.add_argument("--save", action="store_true")
+    s = sub.add_parser("impact", help="Show source files/components changed since the known-good baseline"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("export", help="Export standalone HTML dashboard"); s.add_argument("-o", "--output", default="driftguard-report.html")
     s = sub.add_parser("watch", help="Continuously detect changes"); s.add_argument("--interval", type=int, default=None)
     s = sub.add_parser("serve", help="Run local dashboard"); s.add_argument("--port", type=int, default=8765)
@@ -2727,6 +3652,10 @@ def main() -> int:
     if args.command == "graph": return cmd_graph(root, args.format, Path(args.output) if args.output else None)
     if args.command == "explain": return cmd_explain(root, args.node, args.json)
     if args.command == "validate-next": return cmd_validate_next(root, args.json)
+    if args.command == "validate-plan": return cmd_validate_plan(root, max(1, args.limit), args.json)
+    if args.command == "validation-script": return cmd_validation_script(root, args.shell, Path(args.output) if args.output else None, max(1, args.limit))
+    if args.command == "validate-run": return cmd_validate_run(root, max(1, args.limit), max(1, args.timeout), args.continue_on_failure, args.execute, args.json, args.save)
+    if args.command == "impact": return cmd_impact(root, args.json)
     if args.command == "export": return cmd_export(root, Path(args.output))
     if args.command == "watch": return cmd_watch(root, max(1, args.interval or int(get_config(root).get("watch_interval", 10))))
     if args.command == "serve": return cmd_serve(root, args.port)

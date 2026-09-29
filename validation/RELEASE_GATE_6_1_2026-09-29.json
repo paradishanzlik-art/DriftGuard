@@ -1,0 +1,137 @@
+{
+  "schema": 1,
+  "validated_commit": "e7a701f9186d6913a75775cd721192100963a69b",
+  "validation_date_utc": "2026-09-29",
+  "source": "clean local reconstruction of the GitHub commit tree; all 23 tracked files verified against Git blob SHA-1 values",
+  "platform": "linux",
+  "python_version": "3.12.14",
+  "automated_tests": 65,
+  "harness_passed": true,
+  "steps": [
+    {
+      "name": "compile",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "unit-regression-suite",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "build-wheel",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "create-clean-venv",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "offline-wheel-install",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "installed-import-smoke",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "installed-cli-smoke",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "installed-fixture-init",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "installed-validate-plan",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "installed-validation-script",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "installed-validate-run-dry",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "installed-validate-run-pass",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "installed-validate-run-breaking",
+      "exit_code": 1,
+      "expected_exit_codes": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "name": "installed-validation-semantics",
+      "exit_code": 0,
+      "expected_exit_codes": [
+        0
+      ],
+      "passed": true
+    }
+  ],
+  "showcase": {
+    "source_changes": 1,
+    "targeted_steps": 2,
+    "dry_run_executed": false,
+    "harmless_change_passed": true,
+    "deliberate_failure_caught": true
+  },
+  "limitations": [
+    "Linux/Python 3.12 evidence only for this commit",
+    "Native Windows validation pending",
+    "Human diagnosis-time study pending",
+    "GitHub Actions startup_failure before jobs start"
+  ]
+}
