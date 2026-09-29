@@ -4,7 +4,7 @@ DriftGuard 6.1 is suitable for a bounded engineering portfolio demo. Present the
 
 ## Suggested 90-second walkthrough
 
-1. Run `python examples/showcase.py` from a source checkout. It creates a disposable fixture and prints only aggregate results.
+1. Run `python examples/showcase.py --present` from a source checkout. It creates a disposable fixture and visibly walks through the baseline, harmless edit, impact analysis, validation plan, safe dry-run, passing execution, deliberate syntax break, and caught failure.
 2. Explain the baseline → harmless edit → `impact` → targeted plan → dry-run → passing validation → deliberate syntax failure sequence.
 3. Show the risk graph and the distinction between source impact and environment drift using a project you are authorized to share.
 4. Point to [`VALIDATION.md`](VALIDATION.md) for the exact checks run and the remaining gates.
