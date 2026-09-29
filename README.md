@@ -72,4 +72,8 @@ Risk scores are heuristic rankings, **not calibrated probabilities of build fail
 
 DriftGuard samples bounded source fingerprints and project configuration, plus available SDK, toolchain, dependency, GPU, and native-binary metadata. It compares the current snapshot with the baseline, connects changes to logical components and graph nodes, then proposes checks for the affected areas. Supported source-family detection includes Python, Node/TypeScript, C/C++, Rust, Go, .NET, Java/Kotlin, CUDA, shaders, Unreal, and Unity; command generation and validation coverage vary by family. Unsupported engine or project-specific checks are marked for manual review.
 
-See the [changelog](CHANGELOG.md) for version history. This repository has no license grant yet; the owner must choose terms before publishing it as reusable open-source software.
+## License
+
+DriftGuard is licensed under the [Apache License 2.0](LICENSE).
+
+See the [changelog](CHANGELOG.md) for version history.
