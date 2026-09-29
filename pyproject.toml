@@ -7,6 +7,7 @@ name = "driftguard-local"
 version = "6.1.0"
 description = "Environment drift, structural failure graphs, source-impact intelligence, and risk-prioritized validation planning."
 readme = "README.md"
+license = {text = "Apache-2.0"}
 requires-python = ">=3.9"
 authors = [{name = "DriftGuard"}]
 dependencies = []
