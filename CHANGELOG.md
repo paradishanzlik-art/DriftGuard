@@ -9,6 +9,7 @@
 - Strengthened the installed-wheel validation harness to check JSON outcomes and saved pass/fail evidence, not just process exit codes.
 - Marked manual-only or otherwise incomplete explicit validation runs as incomplete instead of passed; the CLI returns 4 when manual work remains.
 - Kept generated script output compatible with Python 3.9 by using `Path.open(newline=...)`.
+- Recorded 65-test, 14-step committed-source Linux validation for `e7a701f` with a sanitized public evidence summary.
 - Added `validate-plan` to build a bounded sequence of targeted validations from graph risk.
 - Deduplicates equivalent validation commands while retaining the risky nodes each step covers.
 - Orders validation steps by risk, direct evidence, and blast radius so high-value checks run first.

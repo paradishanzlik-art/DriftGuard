@@ -25,7 +25,7 @@ Suggested description:
 
 | Gate | Current position |
 | --- | --- |
-| Linux 6.1 source suite, wheel install, end-to-end fixture | Run on the exact committed source and record commit plus output in `VALIDATION.md` |
+| Linux 6.1 source suite, wheel install, end-to-end fixture | Completed on verified commit `e7a701f`; see `validation/RELEASE_GATE_6_1_2026-09-29.md` |
 | Native Windows | Run `validation/windows_smoke.ps1` on a real Windows host; retain its JSON evidence |
 | Human diagnosis-time study | Conduct the prepared counterbalanced study; do not infer time saved from command overhead |
 | GitHub Actions | Resolve the zero-job `startup_failure` before counting a CI matrix as evidence |
