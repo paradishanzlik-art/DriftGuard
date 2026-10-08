@@ -70,6 +70,8 @@ Use `driftguard --help` for the full command list. Project state and captured lo
 
 ## Evidence and scope
 
+For current-commit release testing, native Windows evidence, the human study, and CI recovery, follow the [final beta evidence gates](validation/BETA_GATES.md). Evidence from earlier commits is not automatically evidence for a new release head.
+
 The pinned 6.0 RC1 at commit `b12e67bb209bd2ae16d8b1b1af1bd5a67533f4e4` passed 48 automated tests and a Linux campaign on 10 unfamiliar known-good repositories. In those 10 cases, harmless source edits passed selected validations and deliberate breaking edits failed them. A 30-pair Linux benchmark measured **0.344 s median added machine time** to obtain a structured diagnosis after a performance fix. That number does not measure time saved for a human engineer.
 
 The 6.1 branch adds the validation plan, script export, and opt-in execution shown above. At source commit `e7a701f9186d6913a75775cd721192100963a69b`, **65 tests and 14 installed-wheel validation steps passed on Linux/Python 3.12** after all 23 tracked files were verified against their Git blob hashes. The [commit-specific record](validation/RELEASE_GATE_6_1_2026-09-29.md) and [validation plan](VALIDATION.md) distinguish this evidence from the earlier RC1.
